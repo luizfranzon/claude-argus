@@ -3,6 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::close_policy::{self, Terminatable};
 use crate::workspace::WorkspaceId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -63,14 +64,16 @@ impl Session {
     }
 }
 
+impl Terminatable for SessionStatus {
+    fn is_terminating(&self) -> bool {
+        matches!(self, SessionStatus::Terminating)
+    }
+}
+
 /// Whether closing a session in the given status requires user confirmation.
-/// Same rule as `Workspace`'s (see `workspace::close_requires_confirmation`) —
-/// kept as a separate function since the two status enums are distinct types.
+/// Same policy as `Workspace`'s — see `close_policy::requires_confirmation`.
 pub fn close_requires_confirmation(status: SessionStatus) -> bool {
-    matches!(
-        status,
-        SessionStatus::Starting | SessionStatus::Running | SessionStatus::AwaitingCloseConfirmation
-    )
+    close_policy::requires_confirmation(status)
 }
 
 #[cfg(test)]

@@ -16,8 +16,8 @@ pub enum HookEventKind {
 /// process is configured (via `--settings`, see `CreateSessionUseCase`) to
 /// GET `<callback_url>?sessionId=<uuid>&event=<prompt_submitted|stop>` from
 /// its `UserPromptSubmit`/`Stop` hooks; this server parses that and invokes
-/// `on_event`, which the composition root turns into a `session-status-changed`
-/// Tauri event. GET (not POST+JSON body) specifically because the hook
+/// `on_event`, which the composition root folds into a Session Runtime
+/// Status update. GET (not POST+JSON body) specifically because the hook
 /// `command` string is interpreted by the OS shell (`cmd.exe` on Windows,
 /// `/bin/sh` elsewhere) — a query string needs no shell-quoting, whereas an
 /// embedded JSON body would need different escaping per platform.

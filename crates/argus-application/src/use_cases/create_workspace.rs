@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use argus_domain::{Session, Workspace, WorkspaceId, WorkspaceStatus};
 use thiserror::Error;
 
-use crate::ports::{DirectoryPicker, HookCallbackPort, PtyPort};
+use crate::ports::{HookCallbackPort, PtyPort};
 use crate::use_cases::create_session::{CreateSessionError, CreateSessionUseCase, OutputSink, SessionExitSink};
 use crate::workspace_manager::WorkspaceManager;
 
@@ -23,59 +23,24 @@ pub struct CreatedWorkspace {
     pub first_session: Session,
 }
 
-/// Creates a Workspace either via the native folder picker or by duplicating
-/// an existing workspace's directory (which never opens the picker), and
-/// auto-spawns its first Session.
-pub struct CreateWorkspaceUseCase<Pty: PtyPort, Picker: DirectoryPicker, Hooks: HookCallbackPort> {
+/// Auto-spawns a Workspace's first Session for a directory already known
+/// (from cwd/argv on launch, or typed into a modal).
+pub struct CreateWorkspaceUseCase<Pty: PtyPort, Hooks: HookCallbackPort> {
     manager: Arc<Mutex<WorkspaceManager>>,
-    picker: Arc<Picker>,
     create_session: Arc<CreateSessionUseCase<Pty, Hooks>>,
 }
 
-impl<Pty: PtyPort, Picker: DirectoryPicker, Hooks: HookCallbackPort> CreateWorkspaceUseCase<Pty, Picker, Hooks> {
+impl<Pty: PtyPort, Hooks: HookCallbackPort> CreateWorkspaceUseCase<Pty, Hooks> {
     pub fn new(
         manager: Arc<Mutex<WorkspaceManager>>,
-        picker: Arc<Picker>,
         create_session: Arc<CreateSessionUseCase<Pty, Hooks>>,
     ) -> Self {
         Self {
             manager,
-            picker,
             create_session,
         }
     }
 
-    /// Opens the native folder picker. Returns `Ok(None)` if the user cancels.
-    pub async fn create_via_picker(
-        &self,
-        on_output: OutputSink,
-        on_exit: SessionExitSink,
-    ) -> Result<Option<CreatedWorkspace>, CreateWorkspaceError> {
-        let Some(dir) = self.picker.pick_folder(None).await else {
-            return Ok(None);
-        };
-        self.spawn_workspace(dir, on_output, on_exit).await.map(Some)
-    }
-
-    /// Reuses `source_id`'s directory. Never calls the picker.
-    pub async fn duplicate(
-        &self,
-        source_id: WorkspaceId,
-        on_output: OutputSink,
-        on_exit: SessionExitSink,
-    ) -> Result<Option<CreatedWorkspace>, CreateWorkspaceError> {
-        let dir = {
-            let manager = self.manager.lock().unwrap();
-            manager.get(source_id).map(|w| w.directory.clone())
-        };
-        let Some(dir) = dir else {
-            return Ok(None);
-        };
-        self.spawn_workspace(dir, on_output, on_exit).await.map(Some)
-    }
-
-    /// Used for the very first workspace on CLI launch (directory already
-    /// known from cwd/argv) and for the GUI-launch directory-picker screen.
     pub async fn create_with_directory(
         &self,
         directory: PathBuf,
@@ -122,7 +87,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::testing::{FakeDirectoryPicker, FakeHookCallbackPort, FakePtyPort};
+    use crate::testing::{FakeHookCallbackPort, FakePtyPort};
     use crate::use_cases::handle_process_exit::HandleSessionProcessExitUseCase;
     use argus_domain::WorkspaceStatus;
 
@@ -133,27 +98,24 @@ mod tests {
     fn use_case(
         manager: Arc<Mutex<WorkspaceManager>>,
         pty: Arc<FakePtyPort>,
-        picker: Arc<FakeDirectoryPicker>,
-    ) -> CreateWorkspaceUseCase<FakePtyPort, FakeDirectoryPicker, FakeHookCallbackPort> {
+    ) -> CreateWorkspaceUseCase<FakePtyPort, FakeHookCallbackPort> {
         let process_exit = Arc::new(HandleSessionProcessExitUseCase::new(Arc::clone(&manager)));
         let hooks = Arc::new(FakeHookCallbackPort::new("http://127.0.0.1:9999/hook"));
         let create_session = Arc::new(CreateSessionUseCase::new(Arc::clone(&manager), pty, hooks, process_exit));
-        CreateWorkspaceUseCase::new(manager, picker, create_session)
+        CreateWorkspaceUseCase::new(manager, create_session)
     }
 
     #[tokio::test]
-    async fn create_via_picker_registers_a_running_workspace_with_first_session() {
+    async fn create_with_directory_registers_a_running_workspace_with_first_session() {
         let manager = Arc::new(Mutex::new(WorkspaceManager::new()));
         let pty = Arc::new(FakePtyPort::new());
-        let picker = Arc::new(FakeDirectoryPicker::returning(Some(PathBuf::from("/tmp/project"))));
-        let use_case = use_case(Arc::clone(&manager), pty, picker);
+        let use_case = use_case(Arc::clone(&manager), pty);
 
         let (on_output, on_exit) = noop_sinks();
         let created = use_case
-            .create_via_picker(on_output, on_exit)
+            .create_with_directory(PathBuf::from("/tmp/project"), on_output, on_exit)
             .await
-            .unwrap()
-            .expect("picker returned a directory");
+            .unwrap();
 
         assert_eq!(created.workspace.status, WorkspaceStatus::Running);
         assert_eq!(created.workspace.directory, PathBuf::from("/tmp/project"));
@@ -167,48 +129,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_via_picker_returns_none_when_cancelled() {
-        let manager = Arc::new(Mutex::new(WorkspaceManager::new()));
-        let pty = Arc::new(FakePtyPort::new());
-        let picker = Arc::new(FakeDirectoryPicker::returning(None));
-        let use_case = use_case(manager, pty, picker);
-
-        let (on_output, on_exit) = noop_sinks();
-        let result = use_case.create_via_picker(on_output, on_exit).await.unwrap();
-
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn duplicate_never_calls_the_picker() {
-        let manager = Arc::new(Mutex::new(WorkspaceManager::new()));
-        let pty = Arc::new(FakePtyPort::new());
-        let picker = Arc::new(FakeDirectoryPicker::returning(Some(PathBuf::from("/should-not-be-used"))));
-        let use_case = use_case(Arc::clone(&manager), pty, Arc::clone(&picker));
-
-        let (on_output, on_exit) = noop_sinks();
-        let source = use_case
-            .create_with_directory(PathBuf::from("/tmp/source"), on_output, on_exit)
-            .await
-            .unwrap();
-
-        let (on_output, on_exit) = noop_sinks();
-        let duplicate = use_case
-            .duplicate(source.workspace.id, on_output, on_exit)
-            .await
-            .unwrap()
-            .expect("source workspace exists");
-
-        assert_eq!(duplicate.workspace.directory, PathBuf::from("/tmp/source"));
-        assert_eq!(picker.call_count(), 0);
-    }
-
-    #[tokio::test]
     async fn session_pty_exit_removes_only_the_session_not_the_workspace() {
         let manager = Arc::new(Mutex::new(WorkspaceManager::new()));
         let pty = Arc::new(FakePtyPort::new());
-        let picker = Arc::new(FakeDirectoryPicker::returning(None));
-        let use_case = use_case(Arc::clone(&manager), Arc::clone(&pty), picker);
+        let use_case = use_case(Arc::clone(&manager), Arc::clone(&pty));
 
         let (on_output, on_exit) = noop_sinks();
         let created = use_case

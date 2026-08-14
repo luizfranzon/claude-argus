@@ -60,7 +60,7 @@ fn parse_status(porcelain: &str) -> Vec<FileStatusEntry> {
         let x = chars.next().unwrap();
         let y = chars.next().unwrap();
         let rest = &line[3..];
-        let path = rest.split(" -> ").last().unwrap_or(rest).to_string();
+        let path = rest.rsplit_once(" -> ").map_or(rest, |(_, to)| to).to_string();
 
         let conflicted = matches!(
             (x, y),
@@ -123,6 +123,12 @@ impl GitPort for GitCliAdapter {
             .unwrap_or_else(|| root_path.display().to_string());
 
         let mut repos = vec![GitRepository { name: root_name, path: root_path.clone(), is_submodule: false }];
+
+        // Skip the spawn entirely for the common case of a repo with no
+        // submodules — `git submodule status` still walks the whole tree.
+        if !tokio::fs::try_exists(root_path.join(".gitmodules")).await.unwrap_or(false) {
+            return repos;
+        }
 
         let submodule_status = run_or_empty(&root_path, &["submodule", "status"]).await;
         for line in submodule_status.lines() {

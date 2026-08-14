@@ -1,5 +1,5 @@
+pub mod close_policy;
 pub mod session;
-pub mod shell;
 pub mod workspace;
 
 pub use session::{

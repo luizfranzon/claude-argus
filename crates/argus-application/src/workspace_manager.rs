@@ -1,26 +1,23 @@
 use std::collections::HashMap;
 
-use argus_domain::shell::{Panel, PanelId, PanelKind, PanelOwner, RegionKind, ShellLayout};
 use argus_domain::{Session, SessionId, Workspace, WorkspaceId, WorkspaceStatus};
 
 use crate::ports::{PtyHandleId, WatchHandle};
 
 /// In-memory aggregate of everything the application layer needs to track:
-/// live workspaces, the Sessions running inside them, the extensible shell
-/// layout they're placed into, the PTY handle backing each Session, and the
-/// PATH resolved once at startup.
+/// live workspaces, the Sessions running inside them, the PTY handle backing
+/// each Session, and the PATH resolved once at startup.
 ///
 /// Deliberately synchronous with no interior locking of its own — the
-/// composition root (src-tauri) is responsible for wrapping this in whatever
-/// concurrency primitive its runtime needs (e.g. `Arc<Mutex<WorkspaceManager>>`).
-/// Keeping it plain here is what makes it trivial to unit test.
+/// composition root is responsible for wrapping this in whatever concurrency
+/// primitive its runtime needs (e.g. `Arc<Mutex<WorkspaceManager>>`). Keeping
+/// it plain here is what makes it trivial to unit test.
 #[derive(Debug, Default)]
 pub struct WorkspaceManager {
     workspaces: HashMap<WorkspaceId, Workspace>,
     sessions: HashMap<SessionId, Session>,
     pty_handles: HashMap<SessionId, PtyHandleId>,
     watch_handles: HashMap<WorkspaceId, WatchHandle>,
-    layout: ShellLayout,
     resolved_path: Option<String>,
 }
 
@@ -31,7 +28,6 @@ impl WorkspaceManager {
             sessions: HashMap::new(),
             pty_handles: HashMap::new(),
             watch_handles: HashMap::new(),
-            layout: ShellLayout::new(),
             resolved_path: None,
         }
     }
@@ -79,53 +75,16 @@ impl WorkspaceManager {
         self.sessions.values().collect()
     }
 
-    pub fn layout(&self) -> &ShellLayout {
-        &self.layout
-    }
-
-    /// Registers a newly-created workspace: stores it and places its sidebar
-    /// panels (FileExplorer, GitPanel — both in SidebarLeft) into the layout.
-    /// No Terminal panel is created here — that happens per-Session via
-    /// `register_session`, since a Workspace no longer owns a PTY directly
-    /// (see ADR-0010). The Editor panel is not created here either; it
-    /// appears on demand when the first file is opened (see `open_editor`).
+    /// Registers a newly-created workspace.
     pub fn register(&mut self, workspace: Workspace) {
-        let workspace_id = workspace.id;
-        self.workspaces.insert(workspace_id, workspace);
-        self.layout.add_panel(Panel::new(
-            PanelKind::FileExplorer(workspace_id),
-            RegionKind::SidebarLeft,
-        ));
-        self.layout.add_panel(Panel::new(
-            PanelKind::GitPanel(workspace_id),
-            RegionKind::SidebarLeft,
-        ));
+        self.workspaces.insert(workspace.id, workspace);
     }
 
-    /// Registers a newly-spawned Session: stores it, records its PTY handle,
-    /// and places its Terminal panel into the Grid region.
+    /// Registers a newly-spawned Session: stores it and records its PTY handle.
     pub fn register_session(&mut self, session: Session, pty_handle: PtyHandleId) {
         let session_id = session.id;
         self.pty_handles.insert(session_id, pty_handle);
         self.sessions.insert(session_id, session);
-        self.layout.add_panel(Panel::new(
-            PanelKind::Terminal(session_id),
-            RegionKind::Grid,
-        ));
-    }
-
-    /// Ensures an Editor panel exists for `id`, creating one in the Grid
-    /// region if this is the first file opened for that Workspace. Idempotent.
-    pub fn open_editor(&mut self, id: WorkspaceId) {
-        let already_open = self
-            .layout
-            .panels()
-            .iter()
-            .any(|p| matches!(p.kind, PanelKind::Editor(workspace_id) if workspace_id == id));
-        if !already_open {
-            self.layout
-                .add_panel(Panel::new(PanelKind::Editor(id), RegionKind::Grid));
-        }
     }
 
     pub fn set_status(&mut self, id: WorkspaceId, status: WorkspaceStatus) {
@@ -146,27 +105,16 @@ impl WorkspaceManager {
         }
     }
 
-    /// Removes a Session and its Terminal panel, returning the freed PTY
-    /// handle (if any) so the caller can tear down the real process.
+    /// Removes a Session, returning the freed PTY handle (if any) so the
+    /// caller can tear down the real process.
     pub fn remove_session(&mut self, id: SessionId) -> Option<PtyHandleId> {
         self.sessions.remove(&id)?;
-        let panel_ids: Vec<PanelId> = self
-            .layout
-            .panels()
-            .iter()
-            .filter(|p| p.kind.owner() == PanelOwner::Session(id))
-            .map(|p| p.id)
-            .collect();
-        for panel_id in panel_ids {
-            self.layout.remove_panel(panel_id);
-        }
         self.pty_handles.remove(&id)
     }
 
     /// Removes a workspace, cascading to every Session it hosts (freeing
-    /// each Session's PTY handle) and every panel it owns directly (Editor,
-    /// FileExplorer, GitPanel — whichever exist). Returns every freed PTY
-    /// handle so the caller can terminate each real process.
+    /// each Session's PTY handle). Returns every freed PTY handle so the
+    /// caller can terminate each real process.
     pub fn remove(&mut self, id: WorkspaceId) -> Vec<PtyHandleId> {
         if self.workspaces.remove(&id).is_none() {
             return Vec::new();
@@ -181,17 +129,6 @@ impl WorkspaceManager {
             .into_iter()
             .filter_map(|session_id| self.remove_session(session_id))
             .collect();
-
-        let panel_ids: Vec<PanelId> = self
-            .layout
-            .panels()
-            .iter()
-            .filter(|p| p.kind.owner() == PanelOwner::Workspace(id))
-            .map(|p| p.id)
-            .collect();
-        for panel_id in panel_ids {
-            self.layout.remove_panel(panel_id);
-        }
 
         freed_handles.shrink_to_fit();
         freed_handles
@@ -211,7 +148,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use argus_domain::shell::RegionKind;
 
     fn sample_workspace() -> Workspace {
         Workspace::new(WorkspaceId::new(), PathBuf::from("/tmp/project"))
@@ -222,31 +158,17 @@ mod tests {
     }
 
     #[test]
-    fn register_adds_workspace_and_sidebar_panels_only() {
+    fn register_adds_workspace() {
         let mut manager = WorkspaceManager::new();
         let workspace = sample_workspace();
         let id = workspace.id;
         manager.register(workspace);
 
         assert!(manager.get(id).is_some());
-        let grid = manager
-            .layout()
-            .regions()
-            .iter()
-            .find(|r| r.kind == RegionKind::Grid)
-            .unwrap();
-        assert!(grid.panels.is_empty());
-        let sidebar = manager
-            .layout()
-            .regions()
-            .iter()
-            .find(|r| r.kind == RegionKind::SidebarLeft)
-            .unwrap();
-        assert_eq!(sidebar.panels.len(), 2);
     }
 
     #[test]
-    fn register_session_adds_terminal_panel() {
+    fn register_session_records_session_and_pty_handle() {
         let mut manager = WorkspaceManager::new();
         let workspace = sample_workspace();
         let workspace_id = workspace.id;
@@ -259,36 +181,10 @@ mod tests {
 
         assert!(manager.get_session(session_id).is_some());
         assert_eq!(manager.pty_handle_for_session(session_id), Some(pty_handle));
-        let grid = manager
-            .layout()
-            .regions()
-            .iter()
-            .find(|r| r.kind == RegionKind::Grid)
-            .unwrap();
-        assert_eq!(grid.panels.len(), 1);
     }
 
     #[test]
-    fn open_editor_adds_grid_panel_once() {
-        let mut manager = WorkspaceManager::new();
-        let workspace = sample_workspace();
-        let id = workspace.id;
-        manager.register(workspace);
-
-        manager.open_editor(id);
-        manager.open_editor(id);
-
-        let editor_panels = manager
-            .layout()
-            .panels()
-            .iter()
-            .filter(|p| matches!(p.kind, PanelKind::Editor(workspace_id) if workspace_id == id))
-            .count();
-        assert_eq!(editor_panels, 1);
-    }
-
-    #[test]
-    fn remove_session_frees_pty_handle_and_panel() {
+    fn remove_session_frees_pty_handle() {
         let mut manager = WorkspaceManager::new();
         let workspace = sample_workspace();
         let workspace_id = workspace.id;
@@ -302,13 +198,6 @@ mod tests {
 
         assert_eq!(freed, Some(pty_handle));
         assert!(manager.get_session(session_id).is_none());
-        let grid = manager
-            .layout()
-            .regions()
-            .iter()
-            .find(|r| r.kind == RegionKind::Grid)
-            .unwrap();
-        assert!(grid.panels.is_empty());
     }
 
     #[test]
@@ -333,7 +222,6 @@ mod tests {
         assert!(manager.get(workspace_id).is_none());
         assert!(manager.get_session(first.id).is_none());
         assert!(manager.get_session(second.id).is_none());
-        assert!(manager.layout().panels().is_empty());
     }
 
     #[test]
@@ -352,8 +240,6 @@ mod tests {
 
         assert!(manager.get(first_id).is_none());
         assert!(manager.get(second_id).is_some());
-        // second workspace's 2 sidebar panels + 1 terminal panel survive
-        assert_eq!(manager.layout().panels().len(), 3);
     }
 
     #[test]

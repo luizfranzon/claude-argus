@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::close_policy::{self, Terminatable};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorkspaceId(Uuid);
 
@@ -43,15 +45,18 @@ impl Workspace {
     }
 }
 
-/// Whether closing a workspace in the given status requires user confirmation.
-///
-/// Always `true` for a live workspace in v1 (no idle/busy detection yet) — kept as
-/// its own function so a future "only confirm if busy" rule only touches this one place.
+impl Terminatable for WorkspaceStatus {
+    fn is_terminating(&self) -> bool {
+        matches!(self, WorkspaceStatus::Terminating)
+    }
+}
+
+/// Whether closing a workspace in the given status requires user
+/// confirmation. Always `true` for a live workspace in v1 (no idle/busy
+/// detection yet) — see `close_policy::requires_confirmation`, shared with
+/// `Session`'s identical policy.
 pub fn close_requires_confirmation(status: WorkspaceStatus) -> bool {
-    matches!(
-        status,
-        WorkspaceStatus::Starting | WorkspaceStatus::Running | WorkspaceStatus::AwaitingCloseConfirmation
-    )
+    close_policy::requires_confirmation(status)
 }
 
 #[cfg(test)]

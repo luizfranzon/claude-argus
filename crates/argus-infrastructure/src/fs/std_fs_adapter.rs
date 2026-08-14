@@ -40,11 +40,14 @@ impl FileSystemPort for StdFsAdapter {
                 is_dir: file_type.is_dir(),
             });
         }
-        entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        let mut keyed: Vec<(String, FileEntry)> =
+            entries.into_iter().map(|e| (e.name.to_lowercase(), e)).collect();
+        keyed.sort_by(|(a_key, a), (b_key, b)| match (a.is_dir, b.is_dir) {
             (true, false) => std::cmp::Ordering::Less,
             (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            _ => a_key.cmp(b_key),
         });
+        let entries = keyed.into_iter().map(|(_, e)| e).collect();
         Ok(entries)
     }
 

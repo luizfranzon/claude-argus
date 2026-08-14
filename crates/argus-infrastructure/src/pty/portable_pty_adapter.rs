@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
 use argus_application::ports::{ExitReason, PtyError, PtyHandleId, PtyPort, SpawnSpec};
@@ -9,7 +9,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 
 struct PtySession {
     writer: Mutex<Box<dyn Write + Send>>,
-    master: Box<dyn MasterPty + Send>,
+    master: Mutex<Box<dyn MasterPty + Send>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
 }
 
@@ -17,9 +17,14 @@ struct PtySession {
 /// starts the target process attached to its slave side, and dedicates one OS
 /// thread to pumping master-side output into `on_output` until EOF, at which
 /// point it reaps the child and invokes `on_exit`.
+///
+/// Sessions are kept behind `Arc` so `write`/`resize`/`kill` only hold the
+/// map lock long enough to clone the handle out — the (potentially
+/// blocking) I/O against one session's PTY never blocks lookups or I/O on
+/// any other session.
 #[derive(Default)]
 pub struct PortablePtyAdapter {
-    sessions: Mutex<HashMap<PtyHandleId, PtySession>>,
+    sessions: RwLock<HashMap<PtyHandleId, Arc<PtySession>>>,
 }
 
 impl PortablePtyAdapter {
@@ -79,54 +84,55 @@ impl PtyPort for PortablePtyAdapter {
 
         spawn_output_pump(reader, child.clone(), spec.on_output, spec.on_exit);
 
-        self.sessions.lock().unwrap().insert(
+        self.sessions.write().unwrap().insert(
             handle,
-            PtySession {
+            Arc::new(PtySession {
                 writer: Mutex::new(writer),
-                master: pair.master,
+                master: Mutex::new(pair.master),
                 child,
-            },
+            }),
         );
 
         Ok(handle)
     }
 
     fn write(&self, handle: PtyHandleId, data: &[u8]) -> Result<(), PtyError> {
-        let sessions = self.sessions.lock().unwrap();
-        let session = sessions.get(&handle).ok_or(PtyError::UnknownHandle)?;
-        let result = session
-            .writer
-            .lock()
-            .unwrap()
-            .write_all(data)
-            .map_err(|e| PtyError::Io(e.to_string()));
+        let session = self.session(handle)?;
+        let result = session.writer.lock().unwrap().write_all(data).map_err(|e| PtyError::Io(e.to_string()));
         result
     }
 
     fn resize(&self, handle: PtyHandleId, cols: u16, rows: u16) -> Result<(), PtyError> {
-        let sessions = self.sessions.lock().unwrap();
-        let session = sessions.get(&handle).ok_or(PtyError::UnknownHandle)?;
-        session
+        let session = self.session(handle)?;
+        let result = session
             .master
+            .lock()
+            .unwrap()
             .resize(PtySize {
                 rows,
                 cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| PtyError::Io(e.to_string()))
+            .map_err(|e| PtyError::Io(e.to_string()));
+        result
     }
 
     fn kill(&self, handle: PtyHandleId) -> Result<(), PtyError> {
-        let sessions = self.sessions.lock().unwrap();
-        let session = sessions.get(&handle).ok_or(PtyError::UnknownHandle)?;
-        let result = session
-            .child
-            .lock()
-            .unwrap()
-            .kill()
-            .map_err(|e| PtyError::Io(e.to_string()));
+        let session = self.session(handle)?;
+        let result = session.child.lock().unwrap().kill().map_err(|e| PtyError::Io(e.to_string()));
         result
+    }
+}
+
+impl PortablePtyAdapter {
+    fn session(&self, handle: PtyHandleId) -> Result<Arc<PtySession>, PtyError> {
+        self.sessions
+            .read()
+            .unwrap()
+            .get(&handle)
+            .cloned()
+            .ok_or(PtyError::UnknownHandle)
     }
 }
 

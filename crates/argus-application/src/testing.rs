@@ -2,14 +2,13 @@
 //! keeps `argus-application`'s real dependency tree free of test-only code.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 
 use crate::ports::{
-    DirectoryPicker, EnvResolutionError, ExitReason, HookCallbackPort, PtyError, PtyHandleId,
-    PtyPort, ShellEnvironmentResolver, SpawnSpec,
+    EnvResolutionError, ExitReason, HookCallbackPort, PtyError, PtyHandleId, PtyPort,
+    ShellEnvironmentResolver, SpawnSpec,
 };
 
 #[derive(Default)]
@@ -77,32 +76,6 @@ impl PtyPort for FakePtyPort {
     fn kill(&self, handle: PtyHandleId) -> Result<(), PtyError> {
         self.kill_calls.lock().unwrap().push(handle);
         Ok(())
-    }
-}
-
-pub struct FakeDirectoryPicker {
-    result: Option<PathBuf>,
-    call_count: Mutex<u32>,
-}
-
-impl FakeDirectoryPicker {
-    pub fn returning(result: Option<PathBuf>) -> Self {
-        Self {
-            result,
-            call_count: Mutex::new(0),
-        }
-    }
-
-    pub fn call_count(&self) -> u32 {
-        *self.call_count.lock().unwrap()
-    }
-}
-
-#[async_trait]
-impl DirectoryPicker for FakeDirectoryPicker {
-    async fn pick_folder(&self, _starting_dir: Option<&Path>) -> Option<PathBuf> {
-        *self.call_count.lock().unwrap() += 1;
-        self.result.clone()
     }
 }
 
