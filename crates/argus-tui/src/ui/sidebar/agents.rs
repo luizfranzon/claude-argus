@@ -27,6 +27,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &AppState, entry: &WorkspaceEntry, h
             let (dot, dot_color) = match session_entry.status {
                 Some(RuntimeStatus::Thinking) => ("●", Color::Yellow),
                 Some(RuntimeStatus::Idle) => ("○", Color::Green),
+                Some(RuntimeStatus::Waiting) => ("◆", Color::Magenta),
                 None => ("○", Color::DarkGray),
             };
             let name_style = if selected {
