@@ -202,6 +202,25 @@ pub enum Modal {
     ConfirmDeletePath { workspace_id: WorkspaceId, path: PathBuf, parent: PathBuf },
 }
 
+impl Modal {
+    /// Routes a bracketed paste into whichever `input` field this modal
+    /// carries, if any — the confirm variants have nothing to paste into.
+    fn paste(&mut self, text: &str) {
+        let input = match self {
+            Modal::NewWorkspacePath { input }
+            | Modal::RenameSession { input, .. }
+            | Modal::NewFile { input, .. }
+            | Modal::NewDir { input, .. }
+            | Modal::RenamePath { input, .. }
+            | Modal::CommitMessage { input, .. } => input,
+            Modal::ConfirmCloseSession { .. }
+            | Modal::ConfirmCloseWorkspace { .. }
+            | Modal::ConfirmDeletePath { .. } => return,
+        };
+        crate::text_input::apply_paste(input, text);
+    }
+}
+
 pub struct AppState {
     pub runtime: Runtime,
     pub workspaces: Vec<WorkspaceId>,
@@ -842,6 +861,35 @@ impl AppState {
         }
     }
 
+    /// Handles a `crossterm::event::Event::Paste` (bracketed paste, enabled
+    /// in `main.rs`): the whole clipboard contents arrive as one string
+    /// instead of a `KeyEvent` per character. Without this, paste falls back
+    /// to individual `Char`/`Enter` key events — visibly trickling in one
+    /// letter at a time, and (worse) every embedded newline hits
+    /// `handle_terminal_key`'s `\r` and gets read by the session as "submit
+    /// now", firing off a partial message mid-paste.
+    ///
+    /// Forwarded to the focused session wrapped in the same
+    /// `ESC[200~...ESC[201~` markers a real terminal would use, so a
+    /// bracketed-paste-aware program inside (a shell, `claude` itself) treats
+    /// it as one paste rather than as typed submits.
+    pub fn on_paste(&mut self, text: String) {
+        if let Some(modal) = self.modal.as_mut() {
+            modal.paste(&text);
+            return;
+        }
+        if self.focus == Focus::Terminal {
+            if let Some(session_id) = self.focused_session_id() {
+                self.selection = None;
+                let mut bytes = Vec::with_capacity(text.len() + 12);
+                bytes.extend_from_slice(b"\x1b[200~");
+                bytes.extend_from_slice(text.as_bytes());
+                bytes.extend_from_slice(b"\x1b[201~");
+                self.runtime.write_to_session(session_id, &bytes);
+            }
+        }
+    }
+
     fn handle_terminal_key(&mut self, key: KeyEvent) {
         // Ctrl+B is the escape hatch back to sidebar navigation, same
         // "leader key" idea as tmux — chosen because a `claude`/shell session
@@ -855,6 +903,24 @@ impl AppState {
             if let Some(bytes) = key_to_bytes(&key) {
                 self.selection = None;
                 self.runtime.write_to_session(session_id, &bytes);
+                // Any keystroke sent while `Waiting` (blocked on a prompt or
+                // permission picker) means the user just answered or
+                // dismissed it — Claude Code won't necessarily fire a
+                // `Notification`/`Stop` hook for that (e.g. Esc), so the
+                // status would otherwise stay purple forever. Esc cancels
+                // the prompt outright, so it goes straight to `Idle`;
+                // anything else (answering it) optimistically resumes
+                // `Thinking` — either way the next real hook event corrects
+                // it.
+                if let Some(entry) = self.sessions.get_mut(&session_id) {
+                    if entry.status == Some(RuntimeStatus::Waiting) {
+                        entry.status = Some(if key.code == KeyCode::Esc {
+                            RuntimeStatus::Idle
+                        } else {
+                            RuntimeStatus::Thinking
+                        });
+                    }
+                }
             }
         }
     }

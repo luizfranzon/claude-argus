@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use base64::Engine;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use futures::StreamExt;
@@ -97,7 +100,7 @@ fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen);
         original(info);
     }));
 }
@@ -141,7 +144,7 @@ fn spawn_suspend_handler(resumed_tx: mpsc::UnboundedSender<()>) -> anyhow::Resul
             match signal {
                 SIGTSTP => {
                     let _ = disable_raw_mode();
-                    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+                    let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen);
                     signal_hook::low_level::emulate_default_handler(SIGTSTP).ok();
                 }
                 SIGTTIN | SIGTTOU => {
@@ -149,7 +152,7 @@ fn spawn_suspend_handler(resumed_tx: mpsc::UnboundedSender<()>) -> anyhow::Resul
                 }
                 SIGCONT => {
                     let _ = enable_raw_mode();
-                    let _ = execute!(io::stdout(), EnterAlternateScreen);
+                    let _ = execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste);
                     let _ = resumed_tx.send(());
                 }
                 _ => {}
@@ -174,14 +177,14 @@ async fn main() -> anyhow::Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = run(&mut terminal, resumed_rx).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     result
@@ -259,6 +262,9 @@ async fn run(
                     }
                     Some(Ok(Event::Mouse(mouse))) => {
                         state.on_mouse(mouse, &hitmap);
+                    }
+                    Some(Ok(Event::Paste(text))) => {
+                        state.on_paste(text);
                     }
                     Some(Ok(Event::Resize(cols, rows))) => {
                         let full = ratatui::layout::Rect::new(0, 0, cols, rows);

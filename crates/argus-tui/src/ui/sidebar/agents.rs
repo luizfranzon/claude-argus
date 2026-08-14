@@ -8,6 +8,17 @@ use crate::app::{AppState, RuntimeStatus, WorkspaceEntry};
 use crate::ui::hitmap::HitMap;
 use crate::ui::scroll;
 
+const SPINNER_FRAMES: [char; 6] = ['⠻', '⠽', '⠾', '⠷', '⠯', '⠟'];
+
+fn spinner_frame() -> char {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let idx = (millis / 120) as usize % SPINNER_FRAMES.len();
+    SPINNER_FRAMES[idx]
+}
+
 pub fn draw(f: &mut Frame, area: Rect, app: &AppState, entry: &WorkspaceEntry, hitmap: &mut HitMap) {
     let (visible, offset, visible_selected) =
         scroll::window(&entry.sessions, entry.agents_selected, area.height as usize);
@@ -24,11 +35,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &AppState, entry: &WorkspaceEntry, h
             let Some(session_entry) = app.sessions.get(session_id) else {
                 return ListItem::new("…");
             };
-            let (dot, dot_color) = match session_entry.status {
-                Some(RuntimeStatus::Thinking) => ("●", Color::Yellow),
-                Some(RuntimeStatus::Idle) => ("○", Color::Green),
-                Some(RuntimeStatus::Waiting) => ("◆", Color::Magenta),
-                None => ("○", Color::DarkGray),
+            let (dot, dot_color): (String, Color) = match session_entry.status {
+                Some(RuntimeStatus::Thinking) => {
+                    (spinner_frame().to_string(), Color::Rgb(255, 165, 0))
+                }
+                Some(RuntimeStatus::Idle) => ("○".to_string(), Color::Green),
+                Some(RuntimeStatus::Waiting) => ("◆".to_string(), Color::Magenta),
+                None => ("○".to_string(), Color::DarkGray),
             };
             let name_style = if selected {
                 Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray)

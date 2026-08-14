@@ -8,6 +8,16 @@ pub enum TextInputAction {
     Cancel,
 }
 
+/// Appends a paste's contents to a single-line modal `input`. These fields
+/// have no notion of a line break, so embedded newlines (a multi-line
+/// clipboard paste, or the trailing newline many terminals add) are dropped
+/// rather than being forwarded — without this a pasted multi-line value
+/// would otherwise need `apply`'s `KeyCode::Enter` handling, which submits
+/// the modal instead of inserting a line break.
+pub fn apply_paste(input: &mut String, text: &str) {
+    input.extend(text.chars().filter(|c| *c != '\n' && *c != '\r'));
+}
+
 /// The single text-editing keymap every modal in `app.rs` shares: Enter
 /// submits, Esc cancels, Backspace/Char edit `input` in place, anything
 /// else is ignored. One interface for all six `Modal` variants that carry
