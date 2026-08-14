@@ -128,6 +128,7 @@ async fn run(
     let (tx, mut rx) = mpsc::unbounded_channel();
     let rt = Runtime::new(tx)?;
     rt.resolve_startup_path().await;
+    rt.watch_claude_sessions();
 
     let size = terminal.size()?;
     let full = ratatui::layout::Rect::new(0, 0, size.width, size.height);
@@ -139,6 +140,7 @@ async fn run(
 
     let mut events = EventStream::new();
     let mut hitmap = ui::HitMap::default();
+    let mut mouse_capture_enabled = state.mouse_capture_enabled;
 
     loop {
         terminal.draw(|f| {
@@ -147,6 +149,15 @@ async fn run(
 
         if state.should_quit {
             return Ok(());
+        }
+
+        if state.mouse_capture_enabled != mouse_capture_enabled {
+            mouse_capture_enabled = state.mouse_capture_enabled;
+            if mouse_capture_enabled {
+                execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            } else {
+                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            }
         }
 
         tokio::select! {

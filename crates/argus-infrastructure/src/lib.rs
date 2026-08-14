@@ -1,9 +1,11 @@
+pub mod claude_sessions;
 pub mod env;
 pub mod fs;
 pub mod git;
 pub mod hooks;
 pub mod pty;
 
+pub use claude_sessions::{claude_sessions_dir, read_claude_session_names};
 pub use env::PlatformPathResolver;
 pub use fs::{NotifyWatcherAdapter, StdFsAdapter};
 pub use git::GitCliAdapter;

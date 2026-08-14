@@ -8,10 +8,8 @@ use ratatui::Frame;
 use crate::app::WorkspaceEntry;
 use crate::ui::hitmap::HitMap;
 
-/// Builds the key-hints row as styled spans (key bold-cyan, label dim-gray)
-/// so `Paragraph::wrap` can flow it across as many lines as the sidebar's
-/// current width actually needs, instead of one long unstyled string that
-/// just got truncated at narrower widths.
+/// Shows the pending commit message, if any (the only thing this row still
+/// carries — the key hints now live exclusively in the bottom status bar).
 fn hints_line(entry: &WorkspaceEntry) -> Line<'static> {
     if !entry.git.commit_message.is_empty() {
         return Line::from(vec![
@@ -21,23 +19,7 @@ fn hints_line(entry: &WorkspaceEntry) -> Line<'static> {
         .style(Style::default().fg(Color::DarkGray));
     }
 
-    const HINTS: &[(&str, &str)] = &[
-        ("␣", "stage"),
-        ("c", "commit"),
-        ("f", "fetch"),
-        ("p", "pull"),
-        ("P", "push"),
-        ("b", "branch"),
-        ("l", "log"),
-    ];
-    let key_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(Color::DarkGray);
-    let mut spans = Vec::with_capacity(HINTS.len() * 3);
-    for (key, label) in HINTS {
-        spans.push(Span::styled(*key, key_style));
-        spans.push(Span::styled(format!(" {label}  "), label_style));
-    }
-    Line::from(spans)
+    Line::default()
 }
 
 /// How many rows `Paragraph::wrap` will need to lay `line` out at `width`

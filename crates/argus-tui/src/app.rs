@@ -193,6 +193,12 @@ pub struct AppState {
     /// button down on it and still held) — highlights the border and routes
     /// further mouse-move events to resizing instead of click hit-testing.
     pub resizing_sidebar: bool,
+    /// Whether crossterm mouse capture is (meant to be) enabled. Toggled via
+    /// F9 so the user can drop out of it to select/copy terminal text with
+    /// the native terminal selection, then re-enable it for clicks/drag. The
+    /// main loop watches this flag and issues the actual
+    /// Enable/DisableMouseCapture escape sequence when it changes.
+    pub mouse_capture_enabled: bool,
 }
 
 impl AppState {
@@ -214,6 +220,7 @@ impl AppState {
             terminal_size,
             sidebar_width: crate::ui::layout::DEFAULT_SIDEBAR_WIDTH,
             resizing_sidebar: false,
+            mouse_capture_enabled: true,
         }
     }
 
@@ -268,6 +275,12 @@ impl AppState {
                 self.on_workspace_spawned(stream_id, result)
             }
             AppEvent::FsChanged(workspace_id) => self.on_fs_changed(workspace_id),
+            AppEvent::ClaudeSessionRenamed(session_id, name) => {
+                self.runtime.rename_session(session_id, name.clone());
+                if let Some(entry) = self.sessions.get_mut(&session_id) {
+                    entry.session.name = name;
+                }
+            }
             AppEvent::HookStatus(session_id, kind) => {
                 if let Some(entry) = self.sessions.get_mut(&session_id) {
                     entry.status = Some(match kind {
@@ -555,6 +568,16 @@ impl AppState {
     // ---- key handling ------------------------------------------------
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::F(9) {
+            self.mouse_capture_enabled = !self.mouse_capture_enabled;
+            self.set_status(if self.mouse_capture_enabled {
+                "Mouse capture on".to_string()
+            } else {
+                "Mouse capture off — select terminal text freely".to_string()
+            });
+            return;
+        }
+
         if self.modal.is_some() {
             self.handle_modal_key(key);
             return;

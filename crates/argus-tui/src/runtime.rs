@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use argus_application::ports::{ExitReason, FileSystemPort, FileWatcherPort, GitPort, PtyPort};
+use argus_application::ports::{
+    ExitReason, FileSystemPort, FileWatcherPort, GitPort, PtyPort, WatchHandle,
+};
 use argus_application::use_cases::{
     ConfirmCloseError, ConfirmCloseSessionError, ConfirmCloseSessionUseCase,
     ConfirmCloseWorkspaceUseCase, CreateSessionUseCase, CreateWorkspaceUseCase,
@@ -11,13 +13,58 @@ use argus_application::use_cases::{
 use argus_application::WorkspaceManager;
 use argus_domain::{SessionId, WorkspaceId};
 use argus_infrastructure::{
-    GitCliAdapter, HookServer, NotifyWatcherAdapter, PlatformPathResolver,
+    claude_sessions_dir, GitCliAdapter, HookServer, NotifyWatcherAdapter, PlatformPathResolver,
     PortablePtyAdapter, StdFsAdapter,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use crate::event::AppEvent;
+
+/// Appends a timestamped line to `~/.claude/argus-watch-errors.log` when a
+/// `FileWatcherPort::watch()` call fails. These failures are otherwise
+/// silent (see `watch_claude_sessions`/`watch_workspace`) — Argus keeps
+/// running without live-refresh rather than crashing — but silent means
+/// undiagnosable, so this gives you *something* to check when a Session
+/// rename or file-explorer refresh mysteriously never shows up. Best-effort:
+/// if the log itself can't be written, there's nothing more useful to do.
+fn log_watch_failure(what: &str, err: &argus_application::ports::WatchError) {
+    use std::io::Write;
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let path = PathBuf::from(home).join(".claude/argus-watch-errors.log");
+    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = writeln!(file, "[{now}] failed to watch {what}: {err}");
+}
+
+/// Diffs `~/.claude/sessions/*.json` against the manager's live Sessions and
+/// emits `ClaudeSessionRenamed` for each mismatch. A free function (not a
+/// `Runtime` method) so the watch callback — which only has `manager`/`tx`,
+/// not a whole `Runtime` — can call it directly without cloning one.
+fn sync_claude_session_names(
+    manager: &Arc<Mutex<WorkspaceManager>>,
+    dir: &PathBuf,
+    tx: &UnboundedSender<AppEvent>,
+) {
+    let claude_names = argus_infrastructure::read_claude_session_names(dir);
+    if claude_names.is_empty() {
+        return;
+    }
+
+    let manager = manager.lock().unwrap();
+    for (claude_session_id, name) in claude_names {
+        let session_id = SessionId::from(claude_session_id);
+        let Some(session) = manager.get_session(session_id) else { continue };
+        if session.name != name {
+            let _ = tx.send(AppEvent::ClaudeSessionRenamed(session_id, name));
+        }
+    }
+}
 
 type TuiCreateSessionUseCase = CreateSessionUseCase<PortablePtyAdapter, HookServer>;
 type TuiCreateWorkspaceUseCase = CreateWorkspaceUseCase<PortablePtyAdapter, HookServer>;
@@ -196,15 +243,41 @@ impl Runtime {
         self.manager.lock().unwrap().rename_session(session_id, name);
     }
 
+    /// Watches `~/.claude/sessions` so a `/rename` typed inside a `claude`
+    /// session (Argus's own session file, since `--session-id` makes Argus's
+    /// `SessionId` *be* Claude Code's session id) gets picked up here too.
+    /// A no-op (returns `None`) if `HOME` can't be resolved or the directory
+    /// can't be watched — Argus works fine without this, it just misses the
+    /// auto-rename. Runs one initial sync so already-renamed sessions (e.g.
+    /// `/rename`d before Argus started watching) catch up immediately.
+    pub fn watch_claude_sessions(&self) -> Option<WatchHandle> {
+        let dir = claude_sessions_dir()?;
+        sync_claude_session_names(&self.manager, &dir, &self.tx);
+
+        let tx = self.tx.clone();
+        let manager = Arc::clone(&self.manager);
+        let watch_dir = dir.clone();
+        let display_dir = dir.clone();
+        self.watcher
+            .watch(
+                dir,
+                Box::new(move || sync_claude_session_names(&manager, &watch_dir, &tx)),
+            )
+            .inspect_err(|e| log_watch_failure(&format!("claude sessions dir {display_dir:?}"), e))
+            .ok()
+    }
+
     pub fn watch_workspace(&self, workspace_id: WorkspaceId, root: PathBuf) {
         let tx = self.tx.clone();
-        if let Ok(handle) = self.watcher.watch(
+        let display_root = root.clone();
+        match self.watcher.watch(
             root,
             Box::new(move || {
                 let _ = tx.send(AppEvent::FsChanged(workspace_id));
             }),
         ) {
-            self.manager.lock().unwrap().set_watch_handle(workspace_id, handle);
+            Ok(handle) => self.manager.lock().unwrap().set_watch_handle(workspace_id, handle),
+            Err(e) => log_watch_failure(&format!("workspace root {display_root:?}"), &e),
         }
     }
 

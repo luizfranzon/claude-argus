@@ -33,6 +33,12 @@ pub enum AppEvent {
     },
     FsChanged(WorkspaceId),
     HookStatus(SessionId, HookEventKind),
+    /// A Claude Code session (`~/.claude/sessions/<pid>.json`, see
+    /// `argus_infrastructure::read_claude_session_names`) picked up a new
+    /// `name` — e.g. via that session's own `/rename` — that differs from
+    /// what this Session is currently called. `SessionId` matches because
+    /// it *is* Claude Code's own session id (`--session-id` at spawn).
+    ClaudeSessionRenamed(SessionId, String),
     DirLoaded(WorkspaceId, PathBuf, Result<Vec<FileEntry>, FsError>),
     FsOpDone(WorkspaceId, PathBuf, Result<(), FsError>),
     GitAvailable(bool),
