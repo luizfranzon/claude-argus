@@ -26,10 +26,13 @@ pub enum CreateSessionError {
 ///
 /// Every spawned `claude` process is passed `--session-id` (so Claude
 /// Code's own session id *is* this Session's id — no separate mapping
-/// needed) and a `--settings` JSON string wiring `UserPromptSubmit`/`Stop`
-/// hooks to GET the `HookCallbackPort`'s URL with `sessionId`/`event` query
-/// params, letting the frontend show a "thinking"/"idle" status per Session
+/// needed) and a `--settings` JSON string wiring
+/// `UserPromptSubmit`/`Stop`/`Notification` hooks to GET the
+/// `HookCallbackPort`'s URL with `sessionId`/`event` query params, letting
+/// the frontend show a "thinking"/"idle"/"waiting" status per Session
 /// without parsing PTY output (see docs/adr's status-capture note).
+/// `Notification` fires whenever Claude Code blocks on the user — a tool
+/// permission prompt or a proposed-response/option picker alike.
 pub struct CreateSessionUseCase<Pty: PtyPort, Hooks: HookCallbackPort> {
     manager: Arc<Mutex<WorkspaceManager>>,
     pty: Arc<Pty>,
@@ -134,6 +137,12 @@ fn hook_args(session_id: SessionId, callback_url: String) -> Vec<String> {
                     "command": hook_command(&callback_url, session_id, "stop"),
                 }],
             }],
+            "Notification": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": hook_command(&callback_url, session_id, "notification"),
+                }],
+            }],
         },
     });
 
@@ -207,6 +216,7 @@ mod tests {
         assert_eq!(args[2], "--settings");
         assert!(args[3].contains("UserPromptSubmit"));
         assert!(args[3].contains("Stop"));
+        assert!(args[3].contains("Notification"));
         assert!(args[3].contains("http://127.0.0.1:9999/hook"));
     }
 

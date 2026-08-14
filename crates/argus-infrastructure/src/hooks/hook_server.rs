@@ -9,6 +9,7 @@ use tiny_http::{Method, Response, Server};
 pub enum HookEventKind {
     PromptSubmitted,
     Stopped,
+    Notification,
 }
 
 /// A tiny local HTTP server bound to `127.0.0.1` on an OS-assigned ephemeral
@@ -81,6 +82,7 @@ fn parse_hook_request(url: &str) -> Option<(SessionId, HookEventKind)> {
                 event = match value {
                     "prompt_submitted" => Some(HookEventKind::PromptSubmitted),
                     "stop" => Some(HookEventKind::Stopped),
+                    "notification" => Some(HookEventKind::Notification),
                     _ => None,
                 }
             }
@@ -102,6 +104,15 @@ mod tests {
         let (parsed_id, kind) = parse_hook_request(&url).unwrap();
         assert_eq!(parsed_id, id);
         assert_eq!(kind, HookEventKind::PromptSubmitted);
+    }
+
+    #[test]
+    fn parses_a_notification_event() {
+        let id = SessionId::new();
+        let url = format!("/hook?sessionId={id}&event=notification");
+        let (parsed_id, kind) = parse_hook_request(&url).unwrap();
+        assert_eq!(parsed_id, id);
+        assert_eq!(kind, HookEventKind::Notification);
     }
 
     #[test]

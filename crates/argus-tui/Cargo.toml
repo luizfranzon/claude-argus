@@ -15,13 +15,14 @@ argus-infrastructure = { path = "../argus-infrastructure" }
 serde_json.workspace = true
 uuid.workspace = true
 async-trait.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "process", "io-util"] }
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 tui-term = "0.2"
 vt100 = "0.15"
 futures = "0.3"
 anyhow = "1"
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"

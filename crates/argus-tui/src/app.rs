@@ -7,6 +7,7 @@ use argus_application::ports::{
 use argus_application::use_cases::CloseDecision;
 use argus_domain::{Session, SessionId, Workspace, WorkspaceId};
 use argus_infrastructure::HookEventKind;
+use base64::Engine;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use uuid::Uuid;
 
@@ -36,12 +37,42 @@ pub enum Focus {
 pub enum RuntimeStatus {
     Thinking,
     Idle,
+    /// Blocked on the user — a tool permission prompt or a proposed-response
+    /// picker (e.g. `AskUserQuestion`), fired by Claude Code's `Notification`
+    /// hook either way.
+    Waiting,
 }
 
 pub struct SessionEntry {
     pub session: Session,
     pub parser: vt100::Parser,
     pub status: Option<RuntimeStatus>,
+    /// Bytes carried over between `on_pty_output` calls while an OSC 52
+    /// clipboard-set sequence from the child process is mid-stream — see
+    /// `scan_osc52`.
+    osc52_partial: Vec<u8>,
+}
+
+/// An in-progress or just-finished mouse selection over a session's PTY
+/// content, in `(row, col)` vt100 grid coordinates. Kept per-mousedown, not
+/// per-session — a new click on any pane starts a fresh one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub session_id: SessionId,
+    pub anchor: (u16, u16),
+    pub cursor: (u16, u16),
+}
+
+impl Selection {
+    /// Anchor/cursor in reading order — `(row, col)` tuples compare
+    /// lexicographically, which is exactly row-major reading order.
+    pub(crate) fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
 }
 
 pub struct ExplorerState {
@@ -193,12 +224,34 @@ pub struct AppState {
     /// button down on it and still held) — highlights the border and routes
     /// further mouse-move events to resizing instead of click hit-testing.
     pub resizing_sidebar: bool,
-    /// Whether crossterm mouse capture is (meant to be) enabled. Toggled via
-    /// F9 so the user can drop out of it to select/copy terminal text with
-    /// the native terminal selection, then re-enable it for clicks/drag. The
-    /// main loop watches this flag and issues the actual
+    /// Whether crossterm mouse capture is (meant to be) enabled. Starts
+    /// `true` so TUI mouse clicks (tabs, sidebar, drag-resize) work out of
+    /// the box; dragging over a session's PTY content still copies on
+    /// mouse-up via the app's own OSC 52-backed selection handling (see
+    /// `finish_selection`), and a `claude` session's own copy-on-select
+    /// keeps working regardless of this flag since `scan_osc52` forwards it
+    /// straight from the raw PTY stream. Toggled via F9 for whoever wants
+    /// the terminal emulator's native mouse selection instead. The main
+    /// loop watches this flag and issues the actual
     /// Enable/DisableMouseCapture escape sequence when it changes.
     pub mouse_capture_enabled: bool,
+    /// Live or just-released selection over a session's PTY content, drawn
+    /// as a highlight by `ui::terminal::draw`. Tracked in-app (rather than
+    /// relying on the terminal emulator's own selection) so copy works
+    /// without needing to drop mouse capture first — see `finish_selection`.
+    pub selection: Option<Selection>,
+    /// Text waiting for the main loop to push to the system clipboard: text
+    /// pulled from a session's vt100 screen on mouse-up (`finish_selection`),
+    /// or a payload decoded out of a session's raw PTY byte stream when the
+    /// child process (`claude`) emits its own OSC 52 "set clipboard" escape
+    /// (`scan_osc52`) — vt100::Parser has no hook for OSC 52 and silently
+    /// drops it, so argus has to notice and act on it itself. Either source
+    /// ends up going out through both an OSC 52 write to the real terminal
+    /// and, best-effort, a direct call to a local clipboard tool (`xsel` /
+    /// `xclip` / `wl-copy`) — GNOME Terminal's VTE deliberately does not
+    /// implement OSC 52 clipboard-set, so the escape sequence alone doesn't
+    /// get the text into the clipboard on that terminal.
+    pub clipboard_copy_requested: Option<String>,
 }
 
 impl AppState {
@@ -221,6 +274,8 @@ impl AppState {
             sidebar_width: crate::ui::layout::DEFAULT_SIDEBAR_WIDTH,
             resizing_sidebar: false,
             mouse_capture_enabled: true,
+            selection: None,
+            clipboard_copy_requested: None,
         }
     }
 
@@ -286,6 +341,7 @@ impl AppState {
                     entry.status = Some(match kind {
                         HookEventKind::PromptSubmitted => RuntimeStatus::Thinking,
                         HookEventKind::Stopped => RuntimeStatus::Idle,
+                        HookEventKind::Notification => RuntimeStatus::Waiting,
                     });
                 }
             }
@@ -386,6 +442,9 @@ impl AppState {
     fn on_pty_output(&mut self, stream_id: Uuid, data: Vec<u8>) {
         if let Some(session_id) = self.stream_to_session.get(&stream_id).copied() {
             if let Some(entry) = self.sessions.get_mut(&session_id) {
+                if let Some(text) = scan_osc52(&mut entry.osc52_partial, &data) {
+                    self.clipboard_copy_requested = Some(text);
+                }
                 entry.parser.process(&data);
             }
         } else {
@@ -413,7 +472,7 @@ impl AppState {
                 let session_id = session.id;
                 self.stream_to_session.insert(stream_id, session_id);
                 let parser = self.new_parser_for(stream_id);
-                self.sessions.insert(session_id, SessionEntry { session, parser, status: None });
+                self.sessions.insert(session_id, SessionEntry { session, parser, status: None, osc52_partial: Vec::new() });
                 if let Some(w) = self.workspace_entries.get_mut(&workspace_id) {
                     w.sessions.push(session_id);
                     w.focused_session = Some(session_id);
@@ -448,7 +507,7 @@ impl AppState {
 
                 self.stream_to_session.insert(stream_id, session_id);
                 let parser = self.new_parser_for(stream_id);
-                self.sessions.insert(session_id, SessionEntry { session, parser, status: None });
+                self.sessions.insert(session_id, SessionEntry { session, parser, status: None, osc52_partial: Vec::new() });
 
                 let mut entry = WorkspaceEntry::new(workspace.clone());
                 entry.sessions.push(session_id);
@@ -571,9 +630,9 @@ impl AppState {
         if key.code == KeyCode::F(9) {
             self.mouse_capture_enabled = !self.mouse_capture_enabled;
             self.set_status(if self.mouse_capture_enabled {
-                "Mouse capture on".to_string()
+                "Mouse capture on — TUI clicks enabled".to_string()
             } else {
-                "Mouse capture off — select terminal text freely".to_string()
+                "Mouse capture off — native terminal selection".to_string()
             });
             return;
         }
@@ -599,21 +658,82 @@ impl AppState {
         if self.modal.is_some() {
             return;
         }
+        let content = Self::terminal_content_rect(hitmap);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.on_resize_handle(mouse.column, hitmap) {
                     self.resizing_sidebar = true;
                 } else {
                     self.handle_click(mouse.column, mouse.row, hitmap);
+                    if hitmap::hit(content, mouse.column, mouse.row) {
+                        if let Some(session_id) = self.focused_session_id() {
+                            let cell = Self::terminal_cell_clamped(content, mouse.column, mouse.row);
+                            self.selection = Some(Selection { session_id, anchor: cell, cursor: cell });
+                        }
+                    } else {
+                        self.selection = None;
+                    }
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.resizing_sidebar => {
                 self.set_sidebar_width(mouse.column, hitmap.full);
             }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(selection) = self.selection.as_mut() {
+                    selection.cursor = Self::terminal_cell_clamped(content, mouse.column, mouse.row);
+                }
+            }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.resizing_sidebar = false;
+                self.finish_selection();
             }
             _ => {}
+        }
+    }
+
+    /// The PTY content rect inside the terminal pane's border (see
+    /// `ui::terminal`'s `Block::bordered()` and `layout::pty_content_size`).
+    fn terminal_content_rect(hitmap: &HitMap) -> ratatui::layout::Rect {
+        let area = hitmap.terminal_area;
+        ratatui::layout::Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_add(1),
+            width: area.width.saturating_sub(2),
+            height: area.height.saturating_sub(2),
+        }
+    }
+
+    /// Maps a raw mouse position to a `(row, col)` cell in the focused
+    /// session's vt100 grid, clamped to the content rect so a drag that
+    /// leaves the pane still extends the selection sensibly.
+    fn terminal_cell_clamped(content: ratatui::layout::Rect, x: u16, y: u16) -> (u16, u16) {
+        if content.width == 0 || content.height == 0 {
+            return (0, 0);
+        }
+        let col = x.saturating_sub(content.x).min(content.width - 1);
+        let row = y.saturating_sub(content.y).min(content.height - 1);
+        (row, col)
+    }
+
+    /// Called on mouse-up: a real drag (anchor != cursor) pulls the
+    /// selected text out of the focused session's vt100 screen buffer and
+    /// queues it for the main loop to push to the system clipboard via
+    /// OSC 52. A plain click with no drag just clears the selection.
+    fn finish_selection(&mut self) {
+        let Some(selection) = self.selection else { return };
+        if selection.anchor == selection.cursor {
+            self.selection = None;
+            return;
+        }
+        let Some(entry) = self.sessions.get(&selection.session_id) else {
+            self.selection = None;
+            return;
+        };
+        let ((start_row, start_col), (end_row, end_col)) = selection.ordered();
+        let text = entry.parser.screen().contents_between(start_row, start_col, end_row, end_col);
+        if !text.is_empty() {
+            self.clipboard_copy_requested = Some(text);
+            self.set_status("Selection copied".to_string());
         }
     }
 
@@ -733,6 +853,7 @@ impl AppState {
         }
         if let Some(session_id) = self.focused_session_id() {
             if let Some(bytes) = key_to_bytes(&key) {
+                self.selection = None;
                 self.runtime.write_to_session(session_id, &bytes);
             }
         }
@@ -1083,6 +1204,97 @@ fn dir_for_selection(rows: &[(PathBuf, usize, bool)], selected: usize, root: &Pa
     }
 }
 
+/// Longest possible prefix of an OSC 52 introducer (`ESC ] 5 2 ;`) — used to
+/// decide how much of a trailing, not-yet-matched tail is worth keeping
+/// across chunk boundaries.
+const OSC52_PREFIX: &[u8] = b"\x1b]52;";
+
+/// Hard cap on how many bytes `scan_osc52` will carry over while waiting for
+/// a sequence to terminate, so a malformed or adversarial stream that opens
+/// `ESC ] 52 ;` and never closes it can't pin unbounded memory.
+const OSC52_MAX_PENDING: usize = 1 << 16;
+
+/// Scans raw PTY bytes for a complete OSC 52 "set clipboard" escape sequence
+/// and, if one is found, base64-decodes its payload and returns the
+/// resulting text, ready to feed into the same clipboard pipeline as a
+/// manual selection (`AppState::clipboard_copy_requested`).
+///
+/// This exists because `vt100::Parser` has no hook for OSC 52 — it treats
+/// selection-copy escapes as an "unhandled osc sequence" and silently drops
+/// them — so without this scan, a `claude` session running inside argus's
+/// embedded PTY loses the copy-on-select behavior it has when run directly
+/// in a real terminal.
+///
+/// `partial` carries bytes across calls: a session's byte stream can split
+/// a single escape sequence across two `on_pty_output` events (e.g. a large
+/// selection's base64 payload landing on a PTY read boundary), so an
+/// in-progress, not-yet-terminated sequence is buffered here until either it
+/// completes or the pending-byte cap is hit.
+fn scan_osc52(partial: &mut Vec<u8>, data: &[u8]) -> Option<String> {
+    partial.extend_from_slice(data);
+
+    let mut found = None;
+    loop {
+        let Some(start) = find_subslice(partial, OSC52_PREFIX) else {
+            // No introducer anywhere in the buffer — keep only a tail that
+            // could still grow into one on the next chunk.
+            let keep = partial.len().min(OSC52_PREFIX.len() - 1);
+            let from = partial.len() - keep;
+            if keep > 0 && OSC52_PREFIX.starts_with(&partial[from..]) {
+                partial.drain(..from);
+            } else {
+                partial.clear();
+            }
+            break;
+        };
+        partial.drain(..start);
+
+        let body = &partial[OSC52_PREFIX.len()..];
+        let bel = body.iter().position(|&b| b == 0x07).map(|i| (i, i + 1));
+        let st = find_subslice(body, b"\x1b\\").map(|i| (i, i + 2));
+        let terminator = match (bel, st) {
+            (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let Some((payload_end, seq_end)) = terminator else {
+            // Sequence not finished yet — wait for more data, unless it's
+            // grown unreasonably large (malformed stream).
+            if partial.len() > OSC52_MAX_PENDING {
+                partial.clear();
+            }
+            break;
+        };
+
+        let seq_len = OSC52_PREFIX.len() + seq_end;
+        let payload = partial[OSC52_PREFIX.len()..OSC52_PREFIX.len() + payload_end].to_vec();
+        partial.drain(..seq_len);
+
+        // Skip clipboard *queries* (payload `?`) — argus can't answer them,
+        // and a real copy-on-select never sends this form.
+        if payload == b"?" || payload.ends_with(b";?") {
+            continue;
+        }
+        // Payload is `Pc;Pd` (or bare `Pd`) — Pd is what we want, base64-encoded.
+        let b64 = match payload.iter().position(|&b| b == b';') {
+            Some(i) => &payload[i + 1..],
+            None => &payload[..],
+        };
+        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64) {
+            found = Some(String::from_utf8_lossy(&decoded).into_owned());
+        }
+    }
+    found
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
 /// Translates a key press into the raw bytes a real terminal would send down
 /// the wire — there is no browser terminal emulator underneath a TUI to do
 /// this for us, so it's re-derived here.
@@ -1138,4 +1350,62 @@ fn function_key_bytes(n: u8) -> Option<Vec<u8>> {
         _ => return None,
     };
     Some(format!("\x1b{code}").into_bytes())
+}
+
+#[cfg(test)]
+mod osc52_tests {
+    use super::scan_osc52;
+
+    #[test]
+    fn finds_a_bel_terminated_sequence() {
+        let mut partial = Vec::new();
+        let found = scan_osc52(&mut partial, b"before\x1b]52;c;aGVsbG8=\x07after");
+        assert_eq!(found.as_deref(), Some("hello"));
+        assert!(partial.is_empty());
+    }
+
+    #[test]
+    fn finds_a_string_terminator_sequence() {
+        let mut partial = Vec::new();
+        let found = scan_osc52(&mut partial, b"\x1b]52;c;aGVsbG8=\x1b\\rest");
+        assert_eq!(found.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn reassembles_a_sequence_split_across_chunks() {
+        let mut partial = Vec::new();
+        assert_eq!(scan_osc52(&mut partial, b"noise \x1b]52;c;aGVs"), None);
+        assert_eq!(scan_osc52(&mut partial, b"bG8=\x07 more noise").as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn ignores_a_clipboard_query() {
+        let mut partial = Vec::new();
+        assert_eq!(scan_osc52(&mut partial, b"\x1b]52;c;?\x07"), None);
+        assert!(partial.is_empty());
+    }
+
+    #[test]
+    fn returns_the_last_of_multiple_sequences_in_one_chunk() {
+        let mut partial = Vec::new();
+        let found = scan_osc52(&mut partial, b"\x1b]52;c;Zmlyc3Q=\x07\x1b]52;c;c2Vjb25k\x07");
+        assert_eq!(found.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn caps_pending_bytes_on_an_unterminated_sequence() {
+        let mut partial = Vec::new();
+        let huge = vec![b'a'; super::OSC52_MAX_PENDING + 1];
+        let mut chunk = b"\x1b]52;c;".to_vec();
+        chunk.extend_from_slice(&huge);
+        assert_eq!(scan_osc52(&mut partial, &chunk), None);
+        assert!(partial.is_empty(), "pending buffer should be dropped once it exceeds the cap");
+    }
+
+    #[test]
+    fn plain_output_leaves_no_residue() {
+        let mut partial = Vec::new();
+        assert_eq!(scan_osc52(&mut partial, b"just some regular claude output\n"), None);
+        assert!(partial.is_empty());
+    }
 }
