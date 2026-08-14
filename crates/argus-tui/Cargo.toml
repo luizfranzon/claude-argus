@@ -5,7 +5,7 @@ edition.workspace = true
 description = "argus - terminal UI for orchestrating Claude Code agent sessions"
 
 [[bin]]
-name = "argus-tui"
+name = "argus"
 path = "src/main.rs"
 
 [dependencies]
