@@ -12,6 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use uuid::Uuid;
 
 use crate::event::AppEvent;
+use crate::notification::NotificationCenter;
 use crate::runtime::Runtime;
 use crate::ui::hitmap::{self, HitMap};
 
@@ -271,6 +272,14 @@ pub struct AppState {
     /// implement OSC 52 clipboard-set, so the escape sequence alone doesn't
     /// get the text into the clipboard on that terminal.
     pub clipboard_copy_requested: Option<String>,
+    /// Toast notification engine — see `notification::NotificationCenter`
+    /// and the `notify_*` methods below for the service other parts of the
+    /// app use to raise one.
+    pub notifications: NotificationCenter,
+    /// Id of whichever toast's close button the mouse is currently over —
+    /// `ui::notification::draw` renders that one `X` in red. Updated on
+    /// every `MouseEventKind::Moved` in `on_mouse`.
+    pub hovered_notification: Option<u64>,
 }
 
 impl AppState {
@@ -295,7 +304,28 @@ impl AppState {
             mouse_capture_enabled: true,
             selection: None,
             clipboard_copy_requested: None,
+            notifications: NotificationCenter::new(),
+            hovered_notification: None,
         }
+    }
+
+    // ---- notifications --------------------------------------------------
+
+    /// Raises an info toast (blue border) — the default kind for routine,
+    /// non-actionable feedback.
+    pub fn notify_info(&mut self, title: impl Into<String>, message: impl Into<String>) {
+        self.notifications.info(title, message);
+    }
+
+    /// Raises a warning toast (orange border) — something worth the user's
+    /// attention but not a failure.
+    pub fn notify_warn(&mut self, title: impl Into<String>, message: impl Into<String>) {
+        self.notifications.warn(title, message);
+    }
+
+    /// Raises an error toast (red border) — an operation failed.
+    pub fn notify_error(&mut self, title: impl Into<String>, message: impl Into<String>) {
+        self.notifications.error(title, message);
     }
 
     const STATUS_LINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
@@ -316,6 +346,7 @@ impl AppState {
                 self.status_line_at = None;
             }
         }
+        self.notifications.tick();
     }
 
     pub fn spawn_initial_workspace(&mut self, directory: PathBuf) {
@@ -370,11 +401,15 @@ impl AppState {
                         entry.explorer.dirs.insert(path, entries);
                     }
                 }
-                Err(e) => self.set_status(format!("erro ao listar diretório: {e}")),
+                Err(e) => {
+                    self.set_status(format!("erro ao listar diretório: {e}"));
+                    self.notify_warn("Erro ao listar diretório", e.to_string());
+                }
             },
             AppEvent::FsOpDone(workspace_id, parent, result) => {
                 if let Err(e) = result {
                     self.set_status(format!("erro no arquivo: {e}"));
+                    self.notify_warn("Erro no arquivo", e.to_string());
                 }
                 self.runtime.spawn_list_dir(workspace_id, parent);
             }
@@ -439,10 +474,12 @@ impl AppState {
             AppEvent::GitActionDone { workspace_id, repo, action, result } => {
                 if let Err(e) = result {
                     self.set_status(format!("git {action} falhou: {e}"));
+                    self.notify_error(format!("git {action} falhou"), e.to_string());
                 } else if action == "commit" {
                     if let Some(w) = self.workspace_entries.get_mut(&workspace_id) {
                         w.git.commit_message.clear();
                     }
+                    self.notify_info("Commit realizado", format!("{}", repo.display()));
                 }
                 self.runtime.spawn_git_refresh(workspace_id, repo);
             }
@@ -504,6 +541,7 @@ impl AppState {
             Err(e) => {
                 self.pending_output.remove(&stream_id);
                 self.set_status(format!("falha ao criar sessão: {e}"));
+                self.notify_error("Falha ao criar sessão", e.to_string());
             }
         }
     }
@@ -545,6 +583,7 @@ impl AppState {
             Err(e) => {
                 self.pending_output.remove(&stream_id);
                 self.set_status(format!("falha ao criar workspace: {e}"));
+                self.notify_error("Falha ao criar workspace", e.to_string());
                 self.should_quit = self.workspaces.is_empty();
             }
         }
@@ -677,10 +716,22 @@ impl AppState {
         if self.modal.is_some() {
             return;
         }
+        if mouse.kind == MouseEventKind::Moved {
+            self.hovered_notification = hitmap
+                .notification_close
+                .iter()
+                .find(|(r, _)| hitmap::hit(*r, mouse.column, mouse.row))
+                .map(|(_, id)| *id);
+            return;
+        }
         let content = Self::terminal_content_rect(hitmap);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.on_resize_handle(mouse.column, hitmap) {
+                if let Some((_, id)) =
+                    hitmap.notification_close.iter().find(|(r, _)| hitmap::hit(*r, mouse.column, mouse.row))
+                {
+                    self.notifications.dismiss(*id);
+                } else if self.on_resize_handle(mouse.column, hitmap) {
                     self.resizing_sidebar = true;
                 } else {
                     self.handle_click(mouse.column, mouse.row, hitmap);
@@ -750,9 +801,13 @@ impl AppState {
         };
         let ((start_row, start_col), (end_row, end_col)) = selection.ordered();
         let text = entry.parser.screen().contents_between(start_row, start_col, end_row, end_col);
-        if !text.is_empty() {
-            self.clipboard_copy_requested = Some(text);
+        self.selection = None;
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            let char_count = trimmed.chars().count();
+            self.clipboard_copy_requested = Some(trimmed.to_string());
             self.set_status("Selection copied".to_string());
+            self.notify_info("Texto copiado", format!("{char_count} caracteres selecionados"));
         }
     }
 

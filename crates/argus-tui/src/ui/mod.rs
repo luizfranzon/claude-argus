@@ -1,6 +1,7 @@
 pub mod hitmap;
 pub mod layout;
 pub mod modal;
+pub mod notification;
 pub mod scroll;
 pub mod sidebar;
 pub mod terminal;
@@ -29,6 +30,9 @@ pub fn draw(f: &mut Frame, app: &AppState) -> HitMap {
     if let Some(m) = &app.modal {
         modal::draw(f, f.area(), m);
     }
+
+    let toasts: Vec<_> = app.notifications.visible().collect();
+    notification::draw(f, f.area(), &toasts, app.hovered_notification, &mut hitmap);
 
     hitmap
 }

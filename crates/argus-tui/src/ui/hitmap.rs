@@ -20,6 +20,9 @@ pub struct HitMap {
     /// `(row, absolute index into GitRepoState::status, file path, staged)`.
     pub git_rows: Vec<(Rect, usize, String, bool)>,
     pub terminal_area: Rect,
+    /// `(close-button cell, notification id)` — one per visible toast, filled
+    /// while drawing the notification stack.
+    pub notification_close: Vec<(Rect, u64)>,
     /// The whole frame — kept so a sidebar-resize drag can re-run
     /// `ui::layout::compute` against it without the caller needing to track
     /// its own copy of the current terminal size.

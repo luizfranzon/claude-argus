@@ -25,10 +25,18 @@ pub fn compute(full: Rect, sidebar_width: u16) -> Regions {
         .constraints([Constraint::Length(sidebar_width), Constraint::Min(0)])
         .split(vertical[1]);
 
+    // The sidebar reserves a top row for its tab strip before its bordered
+    // box begins, which pushes its content one row below the terminal pane's.
+    // Mirror that here so both panes' content lines up.
+    let terminal_column = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(body[1]);
+
     Regions {
         topbar: vertical[0],
         sidebar: body[0],
-        terminal: body[1],
+        terminal: terminal_column[1],
         statusbar: vertical[2],
     }
 }

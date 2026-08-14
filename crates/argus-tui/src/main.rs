@@ -1,6 +1,7 @@
 mod app;
 mod event;
 mod icons;
+mod notification;
 mod runtime;
 mod text_input;
 mod ui;
@@ -238,6 +239,14 @@ async fn run(
             spawn_local_clipboard_copy(text);
         }
 
+        // Fast tick only while a notification is actually mid-animation;
+        // otherwise fall back to the default idle tick.
+        let tick_delay = if state.notifications.is_animating() {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_millis(100)
+        };
+
         tokio::select! {
             Some(()) = resumed_rx.recv() => {
                 terminal.clear()?;
@@ -277,10 +286,12 @@ async fn run(
                     None => return Ok(()),
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+            _ = tokio::time::sleep(tick_delay) => {
                 // periodic redraw tick so hook-status/spinner-like state never
-                // feels stuck between real events, and so a stale status-bar
-                // message gets cleared even with no other input arriving
+                // feels stuck between real events, so a stale status-bar
+                // message gets cleared even with no other input arriving, and
+                // so notification fade in/out (see `notification::Notification::alpha`)
+                // animates smoothly — see `tick_delay` above for the fast/slow split
                 state.tick();
             }
         }
