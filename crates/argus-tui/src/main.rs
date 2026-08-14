@@ -36,9 +36,75 @@ fn install_panic_hook() {
     }));
 }
 
+/// `cargo run` spawns the built binary in its own new process group (to
+/// manage Ctrl+C forwarding itself) but keeps reasserting its own process
+/// group as the terminal's foreground group — one-shot `tcsetpgrp` at
+/// startup wins the race briefly and then loses it again, so this must be
+/// re-claimable, not a single call. `SIGTTOU` has to be ignored around the
+/// call: `tcsetpgrp` from a background group would otherwise immediately
+/// stop us with the same signal we're trying to route around.
+#[cfg(unix)]
+fn claim_terminal_foreground() {
+    unsafe {
+        let previous = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpgrp());
+        libc::signal(libc::SIGTTOU, previous);
+    }
+}
+
+/// `install_panic_hook` and the cleanup after `run()` only cover exit paths;
+/// none of them fire when the process is job-control-stopped.
+///
+/// Ctrl+Z (SIGTSTP) is a real, user-intended suspend: restore the terminal
+/// before actually stopping, and re-enter our TUI state on SIGCONT.
+///
+/// SIGTTIN/SIGTTOU are different — for this app, being backgrounded is
+/// never intentional (see `claim_terminal_foreground`; `cargo run` fights us
+/// for the terminal for the whole session, not just at startup), so treat
+/// the signal as "reclaim and keep going" rather than "stop": every stdin
+/// read or terminal-affecting write that finds us backgrounded re-wins
+/// foreground instead of actually suspending.
+#[cfg(unix)]
+fn spawn_suspend_handler(resumed_tx: mpsc::UnboundedSender<()>) -> anyhow::Result<()> {
+    use signal_hook::consts::signal::{SIGCONT, SIGTSTP, SIGTTIN, SIGTTOU};
+    use signal_hook::iterator::Signals;
+
+    let mut signals = Signals::new([SIGTSTP, SIGTTIN, SIGTTOU, SIGCONT])?;
+    std::thread::spawn(move || {
+        for signal in signals.forever() {
+            match signal {
+                SIGTSTP => {
+                    let _ = disable_raw_mode();
+                    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+                    signal_hook::low_level::emulate_default_handler(SIGTSTP).ok();
+                }
+                SIGTTIN | SIGTTOU => {
+                    claim_terminal_foreground();
+                }
+                SIGCONT => {
+                    let _ = enable_raw_mode();
+                    let _ = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+                    let _ = resumed_tx.send(());
+                }
+                _ => {}
+            }
+        }
+    });
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     install_panic_hook();
+
+    #[cfg(unix)]
+    claim_terminal_foreground();
+
+    let (resumed_tx, resumed_rx) = mpsc::unbounded_channel();
+    #[cfg(unix)]
+    spawn_suspend_handler(resumed_tx)?;
+    #[cfg(not(unix))]
+    drop(resumed_tx);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -46,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal).await;
+    let result = run(&mut terminal, resumed_rx).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
@@ -55,7 +121,10 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Result<()> {
+async fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    mut resumed_rx: mpsc::UnboundedReceiver<()>,
+) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let rt = Runtime::new(tx)?;
     rt.resolve_startup_path().await;
@@ -81,6 +150,9 @@ async fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::R
         }
 
         tokio::select! {
+            Some(()) = resumed_rx.recv() => {
+                terminal.clear()?;
+            }
             Some(app_event) = rx.recv() => {
                 state.handle_app_event(app_event);
             }
