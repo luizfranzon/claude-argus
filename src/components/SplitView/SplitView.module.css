@@ -1,0 +1,24 @@
+.container {
+  display: flex;
+  height: 100%;
+  width: 100%;
+  min-height: 0;
+}
+
+.pane {
+  position: relative;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.handle {
+  width: 4px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: var(--border);
+}
+
+.handle:hover {
+  background: var(--accent-border);
+}
