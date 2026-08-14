@@ -1,38 +1,62 @@
 use std::path::PathBuf;
 
 use argus_application::ports::PtyPort;
-use argus_application::use_cases::{CloseDecision, ExitSink, OutputSink};
+use argus_application::use_cases::{CloseDecision, CreatedWorkspace, OutputSink, SessionExitSink};
 use argus_domain::shell::ShellLayout;
-use argus_domain::{Workspace, WorkspaceId};
+use argus_domain::{Session, Workspace, WorkspaceId};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::fs_commands::{start_watch, stop_watch};
 use crate::events::{
-    StartupPathResolvedEvent, WorkspaceClosedEvent, WorkspaceCloseReason,
-    EVENT_STARTUP_PATH_RESOLVED, EVENT_WORKSPACE_CLOSED, EVENT_WORKSPACE_CREATED,
+    SessionCloseReason, SessionClosedEvent, StartupPathResolvedEvent, WorkspaceClosedEvent,
+    WorkspaceCloseReason, EVENT_SESSION_CLOSED, EVENT_SESSION_CREATED, EVENT_STARTUP_PATH_RESOLVED,
+    EVENT_WORKSPACE_CLOSED, EVENT_WORKSPACE_CREATED,
 };
 use crate::state::AppState;
 
 pub type WorkspaceDto = Workspace;
+pub type SessionDto = Session;
 pub type ShellLayoutDto = ShellLayout;
 
-/// Builds the pair of callbacks every workspace-creating command passes into
-/// the use case: raw PTY bytes go straight to the per-workspace `Channel`
-/// (no JSON envelope), while a process ending on its own is translated into
-/// the low-frequency `workspace-closed` JSON event.
-fn output_and_exit_sinks(app: AppHandle, channel: Channel<Vec<u8>>) -> (OutputSink, ExitSink) {
+/// What every Workspace-creating command returns: the Workspace itself plus
+/// the first Session auto-spawned inside it (see ADR-0010 — a Workspace is
+/// never created "empty"), so the frontend never needs a second round trip
+/// to discover the Session it should render a Terminal for.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorkspaceResponse {
+    pub workspace: WorkspaceDto,
+    pub session: SessionDto,
+}
+
+impl From<CreatedWorkspace> for CreateWorkspaceResponse {
+    fn from(created: CreatedWorkspace) -> Self {
+        Self {
+            workspace: created.workspace,
+            session: created.first_session,
+        }
+    }
+}
+
+/// Builds the pair of callbacks every Session-creating command passes into
+/// the use case: raw PTY bytes go straight to the per-Session `Channel` (no
+/// JSON envelope), while a process ending on its own is translated into the
+/// low-frequency `session-closed` JSON event.
+pub(crate) fn output_and_exit_sinks(
+    app: AppHandle,
+    channel: Channel<Vec<u8>>,
+) -> (OutputSink, SessionExitSink) {
     let on_output: OutputSink = Box::new(move |data| {
         let _ = channel.send(data);
     });
 
-    let on_exit: ExitSink = Box::new(move |workspace_id, _reason| {
-        stop_watch(&app.state::<AppState>(), workspace_id);
+    let on_exit: SessionExitSink = Box::new(move |session_id, _reason| {
         let _ = app.emit(
-            EVENT_WORKSPACE_CLOSED,
-            WorkspaceClosedEvent {
-                id: workspace_id,
-                reason: WorkspaceCloseReason::ProcessExited,
+            EVENT_SESSION_CLOSED,
+            SessionClosedEvent {
+                id: session_id,
+                reason: SessionCloseReason::ProcessExited,
             },
         );
     });
@@ -70,18 +94,19 @@ pub async fn create_workspace_via_picker(
     app: AppHandle,
     state: State<'_, AppState>,
     channel: Channel<Vec<u8>>,
-) -> Result<Option<WorkspaceDto>, String> {
+) -> Result<Option<CreateWorkspaceResponse>, String> {
     let (on_output, on_exit) = output_and_exit_sinks(app.clone(), channel);
-    let workspace = state
+    let created = state
         .create_workspace
         .create_via_picker(on_output, on_exit)
         .await
         .map_err(|e| e.to_string())?;
-    if let Some(workspace) = &workspace {
-        start_watch(&app, &state, workspace.id, workspace.directory.clone());
-        let _ = app.emit(EVENT_WORKSPACE_CREATED, workspace);
+    if let Some(created) = &created {
+        start_watch(&app, &state, created.workspace.id, created.workspace.directory.clone());
+        let _ = app.emit(EVENT_WORKSPACE_CREATED, &created.workspace);
+        let _ = app.emit(EVENT_SESSION_CREATED, &created.first_session);
     }
-    Ok(workspace)
+    Ok(created.map(CreateWorkspaceResponse::from))
 }
 
 #[tauri::command]
@@ -90,16 +115,17 @@ pub async fn create_workspace_with_directory(
     state: State<'_, AppState>,
     channel: Channel<Vec<u8>>,
     directory: String,
-) -> Result<WorkspaceDto, String> {
+) -> Result<CreateWorkspaceResponse, String> {
     let (on_output, on_exit) = output_and_exit_sinks(app.clone(), channel);
-    let workspace = state
+    let created = state
         .create_workspace
         .create_with_directory(PathBuf::from(directory), on_output, on_exit)
         .await
         .map_err(|e| e.to_string())?;
-    start_watch(&app, &state, workspace.id, workspace.directory.clone());
-    let _ = app.emit(EVENT_WORKSPACE_CREATED, &workspace);
-    Ok(workspace)
+    start_watch(&app, &state, created.workspace.id, created.workspace.directory.clone());
+    let _ = app.emit(EVENT_WORKSPACE_CREATED, &created.workspace);
+    let _ = app.emit(EVENT_SESSION_CREATED, &created.first_session);
+    Ok(created.into())
 }
 
 #[tauri::command]
@@ -108,18 +134,19 @@ pub async fn duplicate_workspace(
     state: State<'_, AppState>,
     channel: Channel<Vec<u8>>,
     source_id: WorkspaceId,
-) -> Result<Option<WorkspaceDto>, String> {
+) -> Result<Option<CreateWorkspaceResponse>, String> {
     let (on_output, on_exit) = output_and_exit_sinks(app.clone(), channel);
-    let workspace = state
+    let created = state
         .create_workspace
         .duplicate(source_id, on_output, on_exit)
         .await
         .map_err(|e| e.to_string())?;
-    if let Some(workspace) = &workspace {
-        start_watch(&app, &state, workspace.id, workspace.directory.clone());
-        let _ = app.emit(EVENT_WORKSPACE_CREATED, workspace);
+    if let Some(created) = &created {
+        start_watch(&app, &state, created.workspace.id, created.workspace.directory.clone());
+        let _ = app.emit(EVENT_WORKSPACE_CREATED, &created.workspace);
+        let _ = app.emit(EVENT_SESSION_CREATED, &created.first_session);
     }
-    Ok(workspace)
+    Ok(created.map(CreateWorkspaceResponse::from))
 }
 
 #[derive(serde::Serialize)]
@@ -167,24 +194,33 @@ pub fn confirm_close_workspace(
 }
 
 #[tauri::command]
-pub fn write_to_pty(state: State<'_, AppState>, id: WorkspaceId, data: Vec<u8>) -> Result<(), String> {
+pub fn write_to_pty(
+    state: State<'_, AppState>,
+    id: argus_domain::SessionId,
+    data: Vec<u8>,
+) -> Result<(), String> {
     let handle = state
         .manager
         .lock()
         .unwrap()
-        .pty_handle_for(id)
-        .ok_or_else(|| "unknown workspace".to_string())?;
+        .pty_handle_for_session(id)
+        .ok_or_else(|| "unknown session".to_string())?;
     state.pty.write(handle, &data).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn resize_pty(state: State<'_, AppState>, id: WorkspaceId, cols: u16, rows: u16) -> Result<(), String> {
+pub fn resize_pty(
+    state: State<'_, AppState>,
+    id: argus_domain::SessionId,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
     let handle = state
         .manager
         .lock()
         .unwrap()
-        .pty_handle_for(id)
-        .ok_or_else(|| "unknown workspace".to_string())?;
+        .pty_handle_for_session(id)
+        .ok_or_else(|| "unknown session".to_string())?;
     state.pty.resize(handle, cols, rows).map_err(|e| e.to_string())
 }
 

@@ -63,8 +63,8 @@ impl Default for ShellLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SessionId;
     use crate::shell::panel::PanelKind;
-    use crate::workspace::WorkspaceId;
 
     #[test]
     fn new_layout_seeds_all_regions_empty() {
@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn add_panel_places_it_in_its_region() {
         let mut layout = ShellLayout::new();
-        let panel = Panel::new(PanelKind::Terminal(WorkspaceId::new()), RegionKind::Grid);
+        let panel = Panel::new(PanelKind::Terminal(SessionId::new()), RegionKind::Grid);
         let panel_id = panel.id;
         layout.add_panel(panel);
 
@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn remove_panel_clears_it_from_region_and_layout() {
         let mut layout = ShellLayout::new();
-        let panel = Panel::new(PanelKind::Terminal(WorkspaceId::new()), RegionKind::Grid);
+        let panel = Panel::new(PanelKind::Terminal(SessionId::new()), RegionKind::Grid);
         let panel_id = panel.id;
         layout.add_panel(panel);
 

@@ -1,0 +1,163 @@
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.card {
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.cardDropTarget {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 1px var(--accent-border);
+}
+
+.cardHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 6px 0 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cardHeader:hover {
+  background: var(--panel-hover);
+}
+
+.cardHeaderActive {
+  background: var(--panel);
+}
+
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.avatarNeutral {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.cardName {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.count {
+  color: var(--text-quaternary);
+  font-size: 11px;
+  background: var(--panel);
+  border-radius: 10px;
+  padding: 1px 7px;
+  flex-shrink: 0;
+}
+
+.cardAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.cardAction:hover {
+  background: var(--panel);
+  color: var(--text-primary);
+}
+
+.sessionList {
+  padding: 2px 6px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sessionRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: grab;
+}
+
+.sessionRow:hover {
+  background: var(--panel-hover);
+  color: var(--text-primary);
+}
+
+.sessionIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  background: var(--status-offline-soft);
+  color: var(--status-offline);
+  flex-shrink: 0;
+}
+
+.sessionName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusDot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--status-idle);
+}
+
+.statusThinking {
+  background: var(--status-active);
+  box-shadow: 0 0 0 2px var(--status-working-soft);
+}
+
+.emptyHint {
+  padding: 4px 8px;
+  color: var(--text-quaternary);
+  font-size: 12px;
+}

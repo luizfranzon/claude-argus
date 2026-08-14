@@ -6,16 +6,18 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use argus_application::use_cases::{
-    ConfirmCloseWorkspaceUseCase, CreateWorkspaceUseCase, HandleProcessExitUseCase,
+    ConfirmCloseSessionUseCase, ConfirmCloseWorkspaceUseCase, CreateSessionUseCase,
+    CreateWorkspaceUseCase, HandleSessionProcessExitUseCase, RequestCloseSessionUseCase,
     RequestCloseWorkspaceUseCase, ResolveStartupPathUseCase,
 };
 use argus_application::WorkspaceManager;
 use argus_infrastructure::{
-    GitCliAdapter, NotifyWatcherAdapter, PlatformPathResolver, PortablePtyAdapter, StdFsAdapter,
-    TauriDialogAdapter,
+    GitCliAdapter, HookEventKind, HookServer, NotifyWatcherAdapter, PlatformPathResolver,
+    PortablePtyAdapter, StdFsAdapter, TauriDialogAdapter,
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
+use crate::events::{SessionRuntimeStatus, SessionStatusChangedEvent, EVENT_SESSION_STATUS_CHANGED};
 use crate::state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -38,22 +40,48 @@ pub fn run(initial_directory: Option<PathBuf>) {
             let git = Arc::new(GitCliAdapter::new());
             let picker = Arc::new(TauriDialogAdapter::new(app.handle().clone()));
             let path_resolver = Arc::new(PlatformPathResolver);
-            let process_exit = Arc::new(HandleProcessExitUseCase::new(Arc::clone(&manager)));
+            let session_process_exit =
+                Arc::new(HandleSessionProcessExitUseCase::new(Arc::clone(&manager)));
+
+            let hook_app_handle = app.handle().clone();
+            let hook_server = Arc::new(HookServer::start(move |session_id, kind| {
+                let status = match kind {
+                    HookEventKind::PromptSubmitted => SessionRuntimeStatus::Thinking,
+                    HookEventKind::Stopped => SessionRuntimeStatus::Idle,
+                };
+                let _ = hook_app_handle.emit(
+                    EVENT_SESSION_STATUS_CHANGED,
+                    SessionStatusChangedEvent { session_id, status },
+                );
+            })?);
+
+            let create_session = Arc::new(CreateSessionUseCase::new(
+                Arc::clone(&manager),
+                Arc::clone(&pty),
+                Arc::clone(&hook_server),
+                session_process_exit,
+            ));
 
             let state = AppState {
                 manager: Arc::clone(&manager),
                 pty: Arc::clone(&pty),
+                hook_server,
                 fs,
                 watcher,
                 git,
                 create_workspace: CreateWorkspaceUseCase::new(
                     Arc::clone(&manager),
-                    Arc::clone(&pty),
                     picker,
-                    process_exit,
+                    Arc::clone(&create_session),
                 ),
                 request_close_workspace: RequestCloseWorkspaceUseCase::new(Arc::clone(&manager)),
                 confirm_close_workspace: ConfirmCloseWorkspaceUseCase::new(
+                    Arc::clone(&manager),
+                    Arc::clone(&pty),
+                ),
+                create_session,
+                request_close_session: RequestCloseSessionUseCase::new(Arc::clone(&manager)),
+                confirm_close_session: ConfirmCloseSessionUseCase::new(
                     Arc::clone(&manager),
                     Arc::clone(&pty),
                 ),
@@ -76,6 +104,11 @@ pub fn run(initial_directory: Option<PathBuf>) {
             commands::duplicate_workspace,
             commands::request_close_workspace,
             commands::confirm_close_workspace,
+            commands::create_session,
+            commands::request_close_session,
+            commands::confirm_close_session,
+            commands::rename_session,
+            commands::list_sessions,
             commands::write_to_pty,
             commands::resize_pty,
             commands::list_workspaces,

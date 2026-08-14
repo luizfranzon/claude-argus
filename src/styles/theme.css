@@ -78,6 +78,17 @@
   --status-active: var(--status-working);
   --status-idle: var(--status-stopped);
 
+  /* Feature Group identity colors — distinct from the run-status hues above,
+     which are semantic (working/waiting/stopped), not identity markers. */
+  --group-color-1: #f87171;
+  --group-color-2: #fb923c;
+  --group-color-3: #facc15;
+  --group-color-4: #4ade80;
+  --group-color-5: #2dd4bf;
+  --group-color-6: #38bdf8;
+  --group-color-7: #a78bfa;
+  --group-color-8: #f472b6;
+
   --focus-ring: #38bdf8;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);

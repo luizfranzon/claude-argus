@@ -1,23 +1,12 @@
 import { create } from "zustand";
-import { Channel } from "@tauri-apps/api/core";
 
 import * as tauriApi from "../lib/tauri";
-import type { ShellLayoutDto, WorkspaceDto } from "../lib/types";
+import type { CreateWorkspaceResponse, ShellLayoutDto, WorkspaceDto } from "../lib/types";
 import { useEditorStore } from "./editorStore";
+import { useFeatureGroupStore } from "./featureGroupStore";
+import { newPendingChannel, useSessionStore } from "./sessionStore";
 
-/**
- * Output bytes can arrive on a workspace's Channel before the create-command
- * promise resolves with its WorkspaceId (the PTY starts producing output
- * as soon as it spawns, not when the Rust use case returns). Until a
- * `TerminalView` mounts and takes over `channel.onmessage`, buffer bytes
- * here so nothing written before mount is lost.
- */
-interface PendingChannel {
-  channel: Channel<Uint8Array>;
-  buffered: Uint8Array[];
-}
-
-export type SidebarTab = "explorer" | "git";
+export type SidebarTab = "agents" | "explorer" | "git";
 
 export interface SidebarState {
   activeTab: SidebarTab;
@@ -35,7 +24,6 @@ interface WorkspaceStoreState {
   startupPathStatus: "pending" | "ready" | "error";
   startupPathError?: string;
   pendingCloseWorkspaceId: string | null;
-  channels: Record<string, PendingChannel>;
   shellLayout: ShellLayoutDto | null;
   sidebar: Record<string, SidebarState>;
 
@@ -48,33 +36,26 @@ interface WorkspaceStoreState {
   setActiveWorkspace: (id: string) => void;
   markStartupPathResolved: (ok: boolean, error?: string) => void;
   removeWorkspace: (id: string) => void;
-  takeChannel: (id: string) => PendingChannel | undefined;
   refreshShellLayout: () => Promise<void>;
   setSidebarTab: (workspaceId: string, tab: SidebarTab) => void;
   toggleSidebarCollapsed: (workspaceId: string) => void;
   openEditor: (workspaceId: string) => Promise<void>;
 }
 
-function newPendingChannel(): PendingChannel {
-  const pending: PendingChannel = { channel: new Channel<Uint8Array>(), buffered: [] };
-  pending.channel.onmessage = (data) => {
-    pending.buffered.push(data);
-  };
-  return pending;
-}
-
+/** Registers the created Workspace and its auto-spawned first Session. */
 function registerWorkspace(
   set: (fn: (state: WorkspaceStoreState) => Partial<WorkspaceStoreState>) => void,
-  workspace: WorkspaceDto,
-  pending: PendingChannel,
+  created: CreateWorkspaceResponse,
+  pending: ReturnType<typeof newPendingChannel>,
 ) {
+  const { workspace, session } = created;
   set((state) => ({
     workspaces: { ...state.workspaces, [workspace.id]: workspace },
     order: [...state.order, workspace.id],
     activeWorkspaceId: workspace.id,
-    channels: { ...state.channels, [workspace.id]: pending },
     sidebar: { ...state.sidebar, [workspace.id]: defaultSidebarState() },
   }));
+  useSessionStore.getState().registerSession(session, pending);
 }
 
 export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
@@ -84,31 +65,30 @@ export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
   startupPathStatus: "pending",
   startupPathError: undefined,
   pendingCloseWorkspaceId: null,
-  channels: {},
   shellLayout: null,
   sidebar: {},
 
   createWorkspaceViaPicker: async () => {
     const pending = newPendingChannel();
-    const workspace = await tauriApi.createWorkspaceViaPicker(pending.channel);
-    if (workspace) {
-      registerWorkspace(set, workspace, pending);
+    const created = await tauriApi.createWorkspaceViaPicker(pending.channel);
+    if (created) {
+      registerWorkspace(set, created, pending);
       void get().refreshShellLayout();
     }
   },
 
   createWorkspaceWithDirectory: async (directory: string) => {
     const pending = newPendingChannel();
-    const workspace = await tauriApi.createWorkspaceWithDirectory(directory, pending.channel);
-    registerWorkspace(set, workspace, pending);
+    const created = await tauriApi.createWorkspaceWithDirectory(directory, pending.channel);
+    registerWorkspace(set, created, pending);
     void get().refreshShellLayout();
   },
 
   duplicateWorkspace: async (sourceId: string) => {
     const pending = newPendingChannel();
-    const workspace = await tauriApi.duplicateWorkspace(sourceId, pending.channel);
-    if (workspace) {
-      registerWorkspace(set, workspace, pending);
+    const created = await tauriApi.duplicateWorkspace(sourceId, pending.channel);
+    if (created) {
+      registerWorkspace(set, created, pending);
       void get().refreshShellLayout();
     }
   },
@@ -140,18 +120,17 @@ export const useWorkspaceStore = create<WorkspaceStoreState>((set, get) => ({
   removeWorkspace: (id: string) => {
     set((state) => {
       const { [id]: _removed, ...workspaces } = state.workspaces;
-      const { [id]: _removedChannel, ...channels } = state.channels;
       const { [id]: _removedSidebar, ...sidebar } = state.sidebar;
       const order = state.order.filter((wid) => wid !== id);
       const activeWorkspaceId =
         state.activeWorkspaceId === id ? (order[order.length - 1] ?? null) : state.activeWorkspaceId;
-      return { workspaces, channels, sidebar, order, activeWorkspaceId };
+      return { workspaces, sidebar, order, activeWorkspaceId };
     });
+    useSessionStore.getState().removeSessionsForWorkspace(id);
+    useFeatureGroupStore.getState().removeGroupsForWorkspace(id);
     useEditorStore.getState().closeWorkspace(id);
     void get().refreshShellLayout();
   },
-
-  takeChannel: (id: string) => get().channels[id],
 
   refreshShellLayout: async () => {
     const shellLayout = await tauriApi.getShellLayout();

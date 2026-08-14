@@ -1,7 +1,8 @@
 import { useRef, useState, type PointerEvent } from "react";
-import { FolderTree, GitBranch, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Bot, FolderTree, GitBranch, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { AgentsTree } from "./AgentsTree/AgentsTree";
 import { FileExplorer } from "../FileExplorer/FileExplorer";
 import { GitPanel } from "../GitPanel/GitPanel";
 import styles from "./Sidebar.module.css";
@@ -64,6 +65,14 @@ export function Sidebar({ workspaceId }: SidebarProps) {
       <div className={styles.tabStrip}>
         <button
           type="button"
+          className={activeTab === "agents" ? `${styles.tab} ${styles.tabActive}` : styles.tab}
+          title="Agents"
+          onClick={() => setSidebarTab(workspaceId, "agents")}
+        >
+          <Bot size={15} />
+        </button>
+        <button
+          type="button"
           className={activeTab === "explorer" ? `${styles.tab} ${styles.tabActive}` : styles.tab}
           title="Explorer"
           onClick={() => setSidebarTab(workspaceId, "explorer")}
@@ -89,7 +98,9 @@ export function Sidebar({ workspaceId }: SidebarProps) {
         </button>
       </div>
       <div className={styles.content}>
-        {activeTab === "explorer" ? (
+        {activeTab === "agents" ? (
+          <AgentsTree workspaceId={workspaceId} />
+        ) : activeTab === "explorer" ? (
           <FileExplorer workspaceId={workspaceId} />
         ) : (
           <GitPanel workspaceId={workspaceId} />

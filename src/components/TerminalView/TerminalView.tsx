@@ -3,12 +3,12 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
-import { useWorkspaceStore } from "../../state/workspaceStore";
+import { useSessionStore } from "../../state/sessionStore";
 import * as tauriApi from "../../lib/tauri";
 import styles from "./TerminalView.module.css";
 
 interface TerminalViewProps {
-  workspaceId: string;
+  sessionId: string;
   active: boolean;
 }
 
@@ -17,12 +17,12 @@ function readToken(name: string): string {
 }
 
 /**
- * One xterm.js instance per workspace, kept mounted (just hidden) once
+ * One xterm.js instance per Session, kept mounted (just hidden) once
  * created so switching tabs never tears down or re-buffers PTY output.
- * On mount it takes over the workspace's Channel from the store, flushing
+ * On mount it takes over the Session's Channel from the store, flushing
  * whatever arrived before this component existed.
  */
-export function TerminalView({ workspaceId, active }: TerminalViewProps) {
+export function TerminalView({ sessionId, active }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -48,7 +48,7 @@ export function TerminalView({ workspaceId, active }: TerminalViewProps) {
     term.open(container);
     fitAddon.fit();
 
-    const pending = useWorkspaceStore.getState().takeChannel(workspaceId);
+    const pending = useSessionStore.getState().takeChannel(sessionId);
     if (pending) {
       for (const chunk of pending.buffered) {
         term.write(chunk);
@@ -58,7 +58,7 @@ export function TerminalView({ workspaceId, active }: TerminalViewProps) {
     }
 
     const dataDisposable = term.onData((data) => {
-      void tauriApi.writeToPty(workspaceId, new TextEncoder().encode(data));
+      void tauriApi.writeToPty(sessionId, new TextEncoder().encode(data));
     });
 
     const resizeObserver = new ResizeObserver(() => {
@@ -67,10 +67,10 @@ export function TerminalView({ workspaceId, active }: TerminalViewProps) {
       // react to resizes while actually visible.
       if (container.offsetParent === null) return;
       fitAddon.fit();
-      void tauriApi.resizePty(workspaceId, term.cols, term.rows);
+      void tauriApi.resizePty(sessionId, term.cols, term.rows);
     });
     resizeObserver.observe(container);
-    void tauriApi.resizePty(workspaceId, term.cols, term.rows);
+    void tauriApi.resizePty(sessionId, term.cols, term.rows);
 
     // Native listeners in the capture phase, not React's onDragOver/onDrop
     // props — xterm.js registers its own drag/drop listeners on this same
@@ -106,7 +106,7 @@ export function TerminalView({ workspaceId, active }: TerminalViewProps) {
       fitAddonRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId]);
+  }, [sessionId]);
 
   // Switching back to a tab that was hidden needs an explicit re-fit: xterm's
   // cell measurements can go stale while its container had zero size, and
@@ -119,10 +119,10 @@ export function TerminalView({ workspaceId, active }: TerminalViewProps) {
     if (!term || !fitAddon) return;
     const raf = requestAnimationFrame(() => {
       fitAddon.fit();
-      void tauriApi.resizePty(workspaceId, term.cols, term.rows);
+      void tauriApi.resizePty(sessionId, term.cols, term.rows);
     });
     return () => cancelAnimationFrame(raf);
-  }, [active, workspaceId]);
+  }, [active, sessionId]);
 
   return (
     <div ref={containerRef} className={styles.container} style={{ display: active ? "block" : "none" }} />

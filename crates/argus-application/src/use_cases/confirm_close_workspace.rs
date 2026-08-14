@@ -13,7 +13,9 @@ pub enum ConfirmCloseError {
 }
 
 /// Actually tears a workspace down after the user confirmed the close dialog:
-/// kills its PTY process, then removes the workspace/panel.
+/// kills every one of its Sessions' PTY processes (a Workspace can host
+/// several, see ADR-0010), then removes the workspace and its panels. One
+/// confirmation covers the whole Workspace, not one per Session.
 pub struct ConfirmCloseWorkspaceUseCase<Pty: PtyPort> {
     manager: Arc<Mutex<WorkspaceManager>>,
     pty: Arc<Pty>,
@@ -25,11 +27,10 @@ impl<Pty: PtyPort> ConfirmCloseWorkspaceUseCase<Pty> {
     }
 
     pub fn execute(&self, workspace_id: WorkspaceId) -> Result<(), ConfirmCloseError> {
-        let pty_handle = { self.manager.lock().unwrap().pty_handle_for(workspace_id) };
-        if let Some(handle) = pty_handle {
+        let freed_handles = self.manager.lock().unwrap().remove(workspace_id);
+        for handle in freed_handles {
             self.pty.kill(handle).map_err(ConfirmCloseError::KillFailed)?;
         }
-        self.manager.lock().unwrap().remove(workspace_id);
         Ok(())
     }
 }
@@ -40,21 +41,29 @@ mod tests {
 
     use super::*;
     use crate::testing::FakePtyPort;
-    use argus_domain::Workspace;
+    use argus_domain::{Session, SessionId, Workspace};
 
     #[test]
-    fn kills_pty_exactly_once_and_removes_workspace() {
+    fn kills_every_session_pty_and_removes_workspace() {
         let manager = Arc::new(Mutex::new(WorkspaceManager::new()));
         let pty = Arc::new(FakePtyPort::new());
         let workspace = Workspace::new(WorkspaceId::new(), PathBuf::from("/tmp/project"));
         let id = workspace.id;
-        let handle = crate::ports::PtyHandleId::new();
-        manager.lock().unwrap().register(workspace, handle);
+        manager.lock().unwrap().register(workspace);
+        let first = Session::new(SessionId::new(), id, "Session 1".to_string());
+        let first_handle = crate::ports::PtyHandleId::new();
+        manager.lock().unwrap().register_session(first, first_handle);
+        let second = Session::new(SessionId::new(), id, "Session 2".to_string());
+        let second_handle = crate::ports::PtyHandleId::new();
+        manager.lock().unwrap().register_session(second, second_handle);
 
         let use_case = ConfirmCloseWorkspaceUseCase::new(Arc::clone(&manager), Arc::clone(&pty));
         use_case.execute(id).unwrap();
 
-        assert_eq!(pty.kill_calls(), vec![handle]);
+        let killed = pty.kill_calls();
+        assert_eq!(killed.len(), 2);
+        assert!(killed.contains(&first_handle));
+        assert!(killed.contains(&second_handle));
         assert!(manager.lock().unwrap().get(id).is_none());
     }
 

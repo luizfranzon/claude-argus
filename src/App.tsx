@@ -1,16 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog/ConfirmCloseDialog";
+import { ConfirmCloseSessionDialog } from "./components/ConfirmCloseSessionDialog/ConfirmCloseSessionDialog";
+import { CreateFeatureGroupDialog } from "./components/CreateFeatureGroupDialog/CreateFeatureGroupDialog";
 import { DirectoryPickerScreen } from "./components/DirectoryPickerScreen/DirectoryPickerScreen";
 import { DiffPane } from "./components/Editor/DiffPane";
 import { EditorPane } from "./components/Editor/EditorPane";
+import { Grid } from "./components/Grid/Grid";
 import { Sidebar } from "./components/Sidebar/Sidebar";
 import { SplitView } from "./components/SplitView/SplitView";
 import { StartupScreen } from "./components/StartupScreen/StartupScreen";
-import { TerminalView } from "./components/TerminalView/TerminalView";
 import { TopBar } from "./components/TopBar/TopBar";
 import { WelcomeScreen } from "./components/WelcomeScreen/WelcomeScreen";
 import { useFileTreeEvents } from "./hooks/useFileTreeEvents";
+import { useSessionEvents } from "./hooks/useSessionEvents";
 import { useWorkspaceEvents } from "./hooks/useWorkspaceEvents";
 import * as tauriApi from "./lib/tauri";
 import { useEditorStore } from "./state/editorStore";
@@ -20,6 +23,7 @@ import styles from "./App.module.css";
 
 export default function App() {
   useWorkspaceEvents();
+  useSessionEvents();
   useFileTreeEvents();
 
   const [initialDirectory, setInitialDirectory] = useState<string | null | undefined>(undefined);
@@ -99,10 +103,7 @@ export default function App() {
           <SplitView
             left={
               <div className={styles.terminals}>
-                {order.map((id) => (
-                  <TerminalView key={id} workspaceId={id} active={id === activeWorkspaceId} />
-                ))}
-                {order.length === 0 && <WelcomeScreen />}
+                {order.length > 0 ? <Grid /> : <WelcomeScreen />}
               </div>
             }
             right={
@@ -116,6 +117,8 @@ export default function App() {
         </div>
       </div>
       <ConfirmCloseDialog />
+      <ConfirmCloseSessionDialog />
+      <CreateFeatureGroupDialog />
     </div>
   );
 }

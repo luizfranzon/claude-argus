@@ -5,10 +5,12 @@ import type {
   BranchInfoDto,
   CloseDecisionDto,
   CommitEntryDto,
+  CreateWorkspaceResponse,
   DiffContentDto,
   FileEntryDto,
   FileStatusEntryDto,
   GitRepositoryDto,
+  SessionDto,
   ShellLayoutDto,
   SyncStatusDto,
   WorkspaceDto,
@@ -24,21 +26,21 @@ export function getInitialDirectory(): Promise<string | null> {
 
 export function createWorkspaceViaPicker(
   channel: Channel<Uint8Array>,
-): Promise<WorkspaceDto | null> {
+): Promise<CreateWorkspaceResponse | null> {
   return invoke("create_workspace_via_picker", { channel });
 }
 
 export function createWorkspaceWithDirectory(
   directory: string,
   channel: Channel<Uint8Array>,
-): Promise<WorkspaceDto> {
+): Promise<CreateWorkspaceResponse> {
   return invoke("create_workspace_with_directory", { channel, directory });
 }
 
 export function duplicateWorkspace(
   sourceId: string,
   channel: Channel<Uint8Array>,
-): Promise<WorkspaceDto | null> {
+): Promise<CreateWorkspaceResponse | null> {
   return invoke("duplicate_workspace", { channel, sourceId });
 }
 
@@ -50,10 +52,36 @@ export function confirmCloseWorkspace(id: string): Promise<void> {
   return invoke("confirm_close_workspace", { id });
 }
 
+export function createSession(
+  workspaceId: string,
+  channel: Channel<Uint8Array>,
+  name?: string,
+): Promise<SessionDto> {
+  return invoke("create_session", { workspaceId, channel, name: name ?? null });
+}
+
+export function requestCloseSession(id: string): Promise<CloseDecisionDto> {
+  return invoke("request_close_session", { id });
+}
+
+export function confirmCloseSession(id: string): Promise<void> {
+  return invoke("confirm_close_session", { id });
+}
+
+export function renameSession(id: string, name: string): Promise<void> {
+  return invoke("rename_session", { id, name });
+}
+
+export function listSessions(): Promise<SessionDto[]> {
+  return invoke("list_sessions");
+}
+
+/** `id` is a SessionId — a Workspace no longer owns a PTY directly (ADR-0010). */
 export function writeToPty(id: string, data: Uint8Array): Promise<void> {
   return invoke("write_to_pty", { id, data: Array.from(data) });
 }
 
+/** `id` is a SessionId — a Workspace no longer owns a PTY directly (ADR-0010). */
 export function resizePty(id: string, cols: number, rows: number): Promise<void> {
   return invoke("resize_pty", { id, cols, rows });
 }

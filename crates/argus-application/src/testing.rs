@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use crate::ports::{
-    DirectoryPicker, EnvResolutionError, ExitReason, PtyError, PtyHandleId, PtyPort,
-    ShellEnvironmentResolver, SpawnSpec,
+    DirectoryPicker, EnvResolutionError, ExitReason, HookCallbackPort, PtyError, PtyHandleId,
+    PtyPort, ShellEnvironmentResolver, SpawnSpec,
 };
 
 #[derive(Default)]
@@ -47,6 +47,13 @@ impl FakePtyPort {
         if let Some(spec) = specs.get(&handle) {
             (spec.on_output)(data);
         }
+    }
+
+    /// The `args` of the most recently spawned `SpawnSpec`, if any.
+    pub fn last_args(&self) -> Option<Vec<String>> {
+        let spawned = self.spawned.lock().unwrap();
+        let handle = spawned.last()?;
+        self.specs.lock().unwrap().get(handle).map(|spec| spec.args.clone())
     }
 }
 
@@ -122,5 +129,21 @@ impl ShellEnvironmentResolver for FakeShellEnvironmentResolver {
     async fn resolve_path(&self) -> Result<String, EnvResolutionError> {
         *self.call_count.lock().unwrap() += 1;
         self.result.clone()
+    }
+}
+
+pub struct FakeHookCallbackPort {
+    url: String,
+}
+
+impl FakeHookCallbackPort {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self { url: url.into() }
+    }
+}
+
+impl HookCallbackPort for FakeHookCallbackPort {
+    fn callback_url(&self) -> String {
+        self.url.clone()
     }
 }

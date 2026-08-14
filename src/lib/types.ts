@@ -10,13 +10,49 @@ export interface WorkspaceDto {
   status: WorkspaceStatus;
 }
 
+export type SessionStatus = "Starting" | "Running" | "AwaitingCloseConfirmation" | "Terminating";
+
+export interface SessionDto {
+  id: string;
+  workspaceId: string;
+  name: string;
+  status: SessionStatus;
+}
+
+/// What every Workspace-creating command returns: the Workspace plus the
+/// first Session auto-spawned inside it (see CONTEXT.md's "Session").
+export interface CreateWorkspaceResponse {
+  workspace: WorkspaceDto;
+  session: SessionDto;
+}
+
 export type CloseDecisionDto = "RequiresConfirmation" | "AlreadyClosed";
 
-export type WorkspaceCloseReason = "UserConfirmed" | "ProcessExited";
+// A Workspace no longer owns a PTY directly (see docs/adr/0010), so it is
+// only ever closed by explicit user action — compare SessionCloseReason,
+// which can also be "ProcessExited".
+export type WorkspaceCloseReason = "UserConfirmed";
 
 export interface WorkspaceClosedEvent {
   id: string;
   reason: WorkspaceCloseReason;
+}
+
+export type SessionCloseReason = "UserConfirmed" | "ProcessExited";
+
+/// Whether a Session's `claude` process is actively working on a prompt —
+/// derived from Claude Code's own `UserPromptSubmit`/`Stop` hooks (see
+/// docs/adr/0010), not from parsing PTY output.
+export type SessionRuntimeStatus = "thinking" | "idle";
+
+export interface SessionStatusChangedEvent {
+  sessionId: string;
+  status: SessionRuntimeStatus;
+}
+
+export interface SessionClosedEvent {
+  id: string;
+  reason: SessionCloseReason;
 }
 
 export interface StartupPathResolvedEvent {
@@ -26,6 +62,8 @@ export interface StartupPathResolvedEvent {
 
 export type RegionKind = "SidebarLeft" | "Grid" | "TopBar" | "BottomBar";
 
+// `Terminal`'s payload is a SessionId as of v3 (see docs/adr/0010) — Editor/
+// FileExplorer/GitPanel stay WorkspaceId-scoped.
 export type PanelKind =
   | { Terminal: string }
   | { Editor: string }
@@ -48,8 +86,13 @@ export interface ShellLayoutDto {
   panels: PanelDto[];
 }
 
-export function panelWorkspaceId(kind: PanelKind): string {
-  return Object.values(kind)[0] as string;
+export type PanelOwner = { kind: "workspace"; id: string } | { kind: "session"; id: string };
+
+export function panelOwner(kind: PanelKind): PanelOwner {
+  if ("Terminal" in kind) {
+    return { kind: "session", id: kind.Terminal };
+  }
+  return { kind: "workspace", id: Object.values(kind)[0] as string };
 }
 
 export interface FileEntryDto {

@@ -38,14 +38,13 @@ mod tests {
 
     use super::*;
     use argus_domain::Workspace;
-    use crate::ports::PtyHandleId;
 
     #[test]
     fn running_workspace_requires_confirmation() {
         let manager = Arc::new(Mutex::new(WorkspaceManager::new()));
         let workspace = Workspace::new(WorkspaceId::new(), PathBuf::from("/tmp/project"));
         let id = workspace.id;
-        manager.lock().unwrap().register(workspace, PtyHandleId::new());
+        manager.lock().unwrap().register(workspace);
 
         let use_case = RequestCloseWorkspaceUseCase::new(manager);
         assert_eq!(use_case.execute(id), CloseDecision::RequiresConfirmation);
