@@ -53,6 +53,27 @@ nesse diretório — mesmo comportamento do Claude Code.
 
 ## Troubleshooting
 
+### Ícones do File Explorer aparecem como quadrados/caixas vazias
+
+O File Explorer usa glyphs de [Nerd Font](https://www.nerdfonts.com/) (Font
+Awesome, codepoints da área de uso privado do Unicode) para os ícones de
+pasta e arquivo — veja `crates/argus-tui/src/icons.rs`. Sem uma Nerd Font
+configurada como fonte do terminal, esses codepoints não têm glyph
+correspondente e aparecem como caixa vazia, `?` ou espaço em branco.
+
+Isso é configuração do **terminal**, não do Argus: se você abre o Argus em
+terminais diferentes (ex: Windows Terminal vs. terminal integrado do editor),
+cada um usa sua própria fonte, então o resultado pode variar entre eles.
+
+Para corrigir:
+
+1. Baixe e instale uma Nerd Font (ex: `JetBrainsMono Nerd Font`, `FiraCode
+   Nerd Font`, `Hack Nerd Font`) em
+   [nerdfonts.com/font-downloads](https://www.nerdfonts.com/font-downloads).
+2. Configure essa fonte nas preferências do terminal onde os ícones não
+   aparecem corretamente.
+3. Reabra o terminal e rode `argus` novamente.
+
 ### File watching (rename de sessão, File Explorer, Git panel) não atualiza sozinho
 
 Argus usa `inotify` para observar `~/.claude/sessions` (rename ao vivo) e a
