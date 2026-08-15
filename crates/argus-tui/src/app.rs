@@ -39,8 +39,9 @@ pub enum RuntimeStatus {
     Thinking,
     Idle,
     /// Blocked on the user — a tool permission prompt or a proposed-response
-    /// picker (e.g. `AskUserQuestion`), fired by Claude Code's `Notification`
-    /// hook either way.
+    /// picker (e.g. `AskUserQuestion`). Fired by Claude Code's `Notification`
+    /// hook, matcher-scoped (see ADR-0012) to skip `idle_prompt` and other
+    /// non-blocking notification types.
     Waiting,
 }
 
@@ -48,32 +49,14 @@ pub struct SessionEntry {
     pub session: Session,
     pub parser: vt100::Parser,
     pub status: Option<RuntimeStatus>,
+    /// Set when the session finishes (`Stopped`, i.e. goes `Idle`) while it
+    /// isn't the currently displayed session. Cleared once the session
+    /// becomes `focused_session_id()` again — see `sync_focused_read`.
+    pub unread: bool,
     /// Bytes carried over between `on_pty_output` calls while an OSC 52
     /// clipboard-set sequence from the child process is mid-stream — see
     /// `scan_osc52`.
     osc52_partial: Vec<u8>,
-}
-
-/// An in-progress or just-finished mouse selection over a session's PTY
-/// content, in `(row, col)` vt100 grid coordinates. Kept per-mousedown, not
-/// per-session — a new click on any pane starts a fresh one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Selection {
-    pub session_id: SessionId,
-    pub anchor: (u16, u16),
-    pub cursor: (u16, u16),
-}
-
-impl Selection {
-    /// Anchor/cursor in reading order — `(row, col)` tuples compare
-    /// lexicographically, which is exactly row-major reading order.
-    pub(crate) fn ordered(&self) -> ((u16, u16), (u16, u16)) {
-        if self.anchor <= self.cursor {
-            (self.anchor, self.cursor)
-        } else {
-            (self.cursor, self.anchor)
-        }
-    }
 }
 
 pub struct ExplorerState {
@@ -246,31 +229,31 @@ pub struct AppState {
     pub resizing_sidebar: bool,
     /// Whether crossterm mouse capture is (meant to be) enabled. Starts
     /// `true` so TUI mouse clicks (tabs, sidebar, drag-resize) work out of
-    /// the box; dragging over a session's PTY content still copies on
-    /// mouse-up via the app's own OSC 52-backed selection handling (see
-    /// `finish_selection`), and a `claude` session's own copy-on-select
-    /// keeps working regardless of this flag since `scan_osc52` forwards it
-    /// straight from the raw PTY stream. Toggled via F9 for whoever wants
-    /// the terminal emulator's native mouse selection instead. The main
-    /// loop watches this flag and issues the actual
+    /// the box, and so clicks/drags/scroll over a session's PTY content
+    /// reach `claude`'s own mouse-tracking UI (see `focused_wants_mouse`) —
+    /// its own copy-on-select keeps working regardless of this flag since
+    /// `scan_osc52` forwards it straight from the raw PTY stream. Toggled via
+    /// F9 for whoever wants the terminal emulator's native mouse handling
+    /// instead. The main loop watches this flag and issues the actual
     /// Enable/DisableMouseCapture escape sequence when it changes.
     pub mouse_capture_enabled: bool,
-    /// Live or just-released selection over a session's PTY content, drawn
-    /// as a highlight by `ui::terminal::draw`. Tracked in-app (rather than
-    /// relying on the terminal emulator's own selection) so copy works
-    /// without needing to drop mouse capture first — see `finish_selection`.
-    pub selection: Option<Selection>,
-    /// Text waiting for the main loop to push to the system clipboard: text
-    /// pulled from a session's vt100 screen on mouse-up (`finish_selection`),
-    /// or a payload decoded out of a session's raw PTY byte stream when the
-    /// child process (`claude`) emits its own OSC 52 "set clipboard" escape
-    /// (`scan_osc52`) — vt100::Parser has no hook for OSC 52 and silently
-    /// drops it, so argus has to notice and act on it itself. Either source
-    /// ends up going out through both an OSC 52 write to the real terminal
-    /// and, best-effort, a direct call to a local clipboard tool (`xsel` /
-    /// `xclip` / `wl-copy`) — GNOME Terminal's VTE deliberately does not
-    /// implement OSC 52 clipboard-set, so the escape sequence alone doesn't
-    /// get the text into the clipboard on that terminal.
+    /// Set for the duration of a button press that started while the focused
+    /// session had its own mouse tracking enabled (`vt100::MouseProtocolMode`
+    /// != `None`, e.g. `claude`'s own "Jump to bottom" button) — every
+    /// `Drag`/`Up` until release is forwarded to the child as a raw SGR mouse
+    /// report, even if the drag strays outside the terminal content rect, so
+    /// the child never sees a press with no matching release.
+    forwarding_mouse: bool,
+    /// Text waiting for the main loop to push to the system clipboard: a
+    /// payload decoded out of a session's raw PTY byte stream when the child
+    /// process (`claude`) emits its own OSC 52 "set clipboard" escape
+    /// (`scan_osc52`) — `vt100::Parser` has no hook for OSC 52 and silently
+    /// drops it, so argus has to notice and act on it itself. Goes out
+    /// through both an OSC 52 write to the real terminal and, best-effort, a
+    /// direct call to a local clipboard tool (`xsel` / `xclip` / `wl-copy`) —
+    /// GNOME Terminal's VTE deliberately does not implement OSC 52
+    /// clipboard-set, so the escape sequence alone doesn't get the text into
+    /// the clipboard on that terminal.
     pub clipboard_copy_requested: Option<String>,
     /// Toast notification engine — see `notification::NotificationCenter`
     /// and the `notify_*` methods below for the service other parts of the
@@ -302,7 +285,7 @@ impl AppState {
             sidebar_width: crate::ui::layout::DEFAULT_SIDEBAR_WIDTH,
             resizing_sidebar: false,
             mouse_capture_enabled: true,
-            selection: None,
+            forwarding_mouse: false,
             clipboard_copy_requested: None,
             notifications: NotificationCenter::new(),
             hovered_notification: None,
@@ -367,6 +350,19 @@ impl AppState {
         self.active_entry().and_then(|w| w.focused_session)
     }
 
+    /// Marks the currently displayed session as read. Called once per event
+    /// loop iteration (see `main.rs`) so any path that changes which session
+    /// is focused — direct selection, auto-focus on close, switching back to
+    /// a workspace whose focused session didn't change — clears `unread`
+    /// uniformly, without each call site needing to know about it.
+    pub fn sync_focused_read(&mut self) {
+        if let Some(id) = self.focused_session_id() {
+            if let Some(entry) = self.sessions.get_mut(&id) {
+                entry.unread = false;
+            }
+        }
+    }
+
     // ---- backend event handling ----------------------------------------
 
     pub fn handle_app_event(&mut self, event: AppEvent) {
@@ -387,12 +383,14 @@ impl AppState {
                 }
             }
             AppEvent::HookStatus(session_id, kind) => {
+                let is_focused = self.focused_session_id() == Some(session_id);
                 if let Some(entry) = self.sessions.get_mut(&session_id) {
                     entry.status = Some(match kind {
                         HookEventKind::PromptSubmitted => RuntimeStatus::Thinking,
                         HookEventKind::Stopped => RuntimeStatus::Idle,
                         HookEventKind::Notification => RuntimeStatus::Waiting,
                     });
+                    entry.unread = kind == HookEventKind::Stopped && !is_focused;
                 }
             }
             AppEvent::DirLoaded(workspace_id, path, result) => match result {
@@ -528,7 +526,7 @@ impl AppState {
                 let session_id = session.id;
                 self.stream_to_session.insert(stream_id, session_id);
                 let parser = self.new_parser_for(stream_id);
-                self.sessions.insert(session_id, SessionEntry { session, parser, status: None, osc52_partial: Vec::new() });
+                self.sessions.insert(session_id, SessionEntry { session, parser, status: None, unread: false, osc52_partial: Vec::new() });
                 if let Some(w) = self.workspace_entries.get_mut(&workspace_id) {
                     w.sessions.push(session_id);
                     w.focused_session = Some(session_id);
@@ -564,7 +562,7 @@ impl AppState {
 
                 self.stream_to_session.insert(stream_id, session_id);
                 let parser = self.new_parser_for(stream_id);
-                self.sessions.insert(session_id, SessionEntry { session, parser, status: None, osc52_partial: Vec::new() });
+                self.sessions.insert(session_id, SessionEntry { session, parser, status: None, unread: false, osc52_partial: Vec::new() });
 
                 let mut entry = WorkspaceEntry::new(workspace.clone());
                 entry.sessions.push(session_id);
@@ -712,6 +710,32 @@ impl AppState {
     /// click hit-testing against the regions `ui::draw` recorded while
     /// rendering the last frame. Ignored while a modal is open (the modal
     /// doesn't register any click targets of its own yet).
+    /// Applies a coalesced mouse-wheel flick (see `scroll_coalesce`) as a
+    /// single write of `ticks.abs()` repeated SGR wheel reports — same
+    /// position/gating math as routing one `ScrollUp`/`ScrollDown` through
+    /// `on_mouse`, just batched into one syscall and one redraw instead of
+    /// one per notch, which is what keeps a fast flick from backing up
+    /// `claude`'s stdin behind a pile of redraws and delaying real keystrokes
+    /// typed right after.
+    pub fn on_scroll_burst(&mut self, hitmap: &HitMap, mouse: MouseEvent, ticks: i32) {
+        if self.modal.is_some() || ticks == 0 {
+            return;
+        }
+        let content = Self::terminal_content_rect(hitmap);
+        if !hitmap::hit(content, mouse.column, mouse.row) || !self.focused_wants_mouse() {
+            return;
+        }
+        let Some(session_id) = self.focused_session_id() else { return };
+        let button = if ticks > 0 { 64 } else { 65 };
+        let col = mouse.column.saturating_sub(content.x).saturating_add(1).max(1);
+        let row = mouse.row.saturating_sub(content.y).saturating_add(1).max(1);
+        let mut bytes = Vec::new();
+        for _ in 0..ticks.unsigned_abs() {
+            bytes.extend_from_slice(format!("\x1b[<{button};{col};{row}M").as_bytes());
+        }
+        self.runtime.write_to_session(session_id, &bytes);
+    }
+
     pub fn on_mouse(&mut self, mouse: MouseEvent, hitmap: &HitMap) {
         if self.modal.is_some() {
             return;
@@ -725,6 +749,26 @@ impl AppState {
             return;
         }
         let content = Self::terminal_content_rect(hitmap);
+
+        // Once the focused session's own TUI has claimed the mouse — it
+        // declared an xterm mouse-tracking mode, which is how `claude` makes
+        // its own click targets like "Jump to bottom", and its own
+        // copy-on-select (see `scan_osc52`), work — every event over the
+        // content rect belongs to it, not to Argus. `forwarding_mouse` keeps
+        // that true for the rest of a press even if a drag strays outside
+        // `content`, so the child never sees a press with no matching
+        // release.
+        let over_content = hitmap::hit(content, mouse.column, mouse.row);
+        if self.forwarding_mouse || (over_content && self.focused_wants_mouse()) {
+            match mouse.kind {
+                MouseEventKind::Down(_) => self.forwarding_mouse = true,
+                MouseEventKind::Up(_) => self.forwarding_mouse = false,
+                _ => {}
+            }
+            self.forward_mouse_report(content, mouse);
+            return;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some((_, id)) =
@@ -735,29 +779,73 @@ impl AppState {
                     self.resizing_sidebar = true;
                 } else {
                     self.handle_click(mouse.column, mouse.row, hitmap);
-                    if hitmap::hit(content, mouse.column, mouse.row) {
-                        if let Some(session_id) = self.focused_session_id() {
-                            let cell = Self::terminal_cell_clamped(content, mouse.column, mouse.row);
-                            self.selection = Some(Selection { session_id, anchor: cell, cursor: cell });
-                        }
-                    } else {
-                        self.selection = None;
-                    }
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.resizing_sidebar => {
                 self.set_sidebar_width(mouse.column, hitmap.full);
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                if let Some(selection) = self.selection.as_mut() {
-                    selection.cursor = Self::terminal_cell_clamped(content, mouse.column, mouse.row);
-                }
-            }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.resizing_sidebar = false;
-                self.finish_selection();
             }
             _ => {}
+        }
+    }
+
+    /// Whether the focused session's own TUI has requested xterm mouse
+    /// tracking with SGR encoding (`\x1b[?1000h`/`1002`/`1003` plus `1006`) —
+    /// `claude`'s interactive mouse-driven UI (e.g. its "Jump to bottom"
+    /// button) only works once this is true, since only then does it parse
+    /// mouse reports off its own stdin. Mouse events go nowhere while this is
+    /// false (e.g. a plain shell session that never asked for mouse input) —
+    /// Argus doesn't try to substitute its own click/selection handling.
+    fn focused_wants_mouse(&self) -> bool {
+        self.focused_session_id()
+            .and_then(|id| self.sessions.get(&id))
+            .is_some_and(|entry| {
+                entry.parser.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None
+                    && entry.parser.screen().mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Sgr
+            })
+    }
+
+    /// Forwards `mouse` to the focused session as a standard SGR mouse
+    /// report (`ESC [ < Cb ; Cx ; Cy M`/`m`), the same encoding any real
+    /// terminal emulator sends once an app has requested mouse tracking.
+    /// Covers wheel scroll and clicks/drags alike — `vt100`'s own scrollback
+    /// can't stand in for the wheel case, since `claude` draws through the
+    /// alternate screen buffer (like any full-screen TUI), which never
+    /// accumulates scrollback in any terminal, real or emulated, so scrolling
+    /// the conversation has to be handled by `claude` itself, same as it
+    /// already does for `PageUp`.
+    fn forward_mouse_report(&mut self, content: ratatui::layout::Rect, mouse: MouseEvent) {
+        let Some(session_id) = self.focused_session_id() else { return };
+        let Some((button, release)) = Self::sgr_mouse_button(mouse.kind) else { return };
+        let col = mouse.column.saturating_sub(content.x).saturating_add(1).max(1);
+        let row = mouse.row.saturating_sub(content.y).saturating_add(1).max(1);
+        let suffix = if release { 'm' } else { 'M' };
+        let bytes = format!("\x1b[<{button};{col};{row}{suffix}").into_bytes();
+        self.runtime.write_to_session(session_id, &bytes);
+    }
+
+    /// Maps a crossterm `MouseEventKind` to its SGR `(button code, is
+    /// release)` pair — `Drag` adds the `32` motion offset xterm uses to
+    /// distinguish a move-while-held from a fresh press, and wheel ticks are
+    /// their own pseudo-buttons (`64`/`65`/`66`/`67`) that are always
+    /// "presses", never released.
+    fn sgr_mouse_button(kind: MouseEventKind) -> Option<(u8, bool)> {
+        let base = |b: MouseButton| match b {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+        };
+        match kind {
+            MouseEventKind::Down(b) => Some((base(b), false)),
+            MouseEventKind::Drag(b) => Some((base(b) + 32, false)),
+            MouseEventKind::Up(b) => Some((base(b), true)),
+            MouseEventKind::ScrollUp => Some((64, false)),
+            MouseEventKind::ScrollDown => Some((65, false)),
+            MouseEventKind::ScrollLeft => Some((66, false)),
+            MouseEventKind::ScrollRight => Some((67, false)),
+            MouseEventKind::Moved => None,
         }
     }
 
@@ -770,44 +858,6 @@ impl AppState {
             y: area.y.saturating_add(1),
             width: area.width.saturating_sub(2),
             height: area.height.saturating_sub(2),
-        }
-    }
-
-    /// Maps a raw mouse position to a `(row, col)` cell in the focused
-    /// session's vt100 grid, clamped to the content rect so a drag that
-    /// leaves the pane still extends the selection sensibly.
-    fn terminal_cell_clamped(content: ratatui::layout::Rect, x: u16, y: u16) -> (u16, u16) {
-        if content.width == 0 || content.height == 0 {
-            return (0, 0);
-        }
-        let col = x.saturating_sub(content.x).min(content.width - 1);
-        let row = y.saturating_sub(content.y).min(content.height - 1);
-        (row, col)
-    }
-
-    /// Called on mouse-up: a real drag (anchor != cursor) pulls the
-    /// selected text out of the focused session's vt100 screen buffer and
-    /// queues it for the main loop to push to the system clipboard via
-    /// OSC 52. A plain click with no drag just clears the selection.
-    fn finish_selection(&mut self) {
-        let Some(selection) = self.selection else { return };
-        if selection.anchor == selection.cursor {
-            self.selection = None;
-            return;
-        }
-        let Some(entry) = self.sessions.get(&selection.session_id) else {
-            self.selection = None;
-            return;
-        };
-        let ((start_row, start_col), (end_row, end_col)) = selection.ordered();
-        let text = entry.parser.screen().contents_between(start_row, start_col, end_row, end_col);
-        self.selection = None;
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            let char_count = trimmed.chars().count();
-            self.clipboard_copy_requested = Some(trimmed.to_string());
-            self.set_status("Selection copied".to_string());
-            self.notify_info("Texto copiado", format!("{char_count} caracteres selecionados"));
         }
     }
 
@@ -935,7 +985,6 @@ impl AppState {
         }
         if self.focus == Focus::Terminal {
             if let Some(session_id) = self.focused_session_id() {
-                self.selection = None;
                 let mut bytes = Vec::with_capacity(text.len() + 12);
                 bytes.extend_from_slice(b"\x1b[200~");
                 bytes.extend_from_slice(text.as_bytes());
@@ -956,24 +1005,28 @@ impl AppState {
         }
         if let Some(session_id) = self.focused_session_id() {
             if let Some(bytes) = key_to_bytes(&key) {
-                self.selection = None;
                 self.runtime.write_to_session(session_id, &bytes);
-                // Any keystroke sent while `Waiting` (blocked on a prompt or
-                // permission picker) means the user just answered or
-                // dismissed it — Claude Code won't necessarily fire a
-                // `Notification`/`Stop` hook for that (e.g. Esc), so the
-                // status would otherwise stay purple forever. Esc cancels
-                // the prompt outright, so it goes straight to `Idle`;
-                // anything else (answering it) optimistically resumes
-                // `Thinking` — either way the next real hook event corrects
-                // it.
+                // While `Waiting` (blocked on a prompt or permission
+                // picker), only a key that actually resolves the picker
+                // should move the status off `Waiting` — Claude Code won't
+                // necessarily fire a `Notification`/`Stop` hook for that
+                // (e.g. Esc), so the status would otherwise stay purple
+                // forever. Esc or Ctrl+C cancels the prompt outright, so
+                // those go straight to `Idle`; Enter answers it, so that
+                // optimistically resumes `Thinking`. Anything else — arrow
+                // keys, digits, Tab — is just navigating within the picker
+                // and hasn't confirmed anything yet, so it leaves the
+                // status at `Waiting`. Either way, the next real hook event
+                // corrects it.
+                let is_cancel = key.code == KeyCode::Esc
+                    || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL));
                 if let Some(entry) = self.sessions.get_mut(&session_id) {
                     if entry.status == Some(RuntimeStatus::Waiting) {
-                        entry.status = Some(if key.code == KeyCode::Esc {
-                            RuntimeStatus::Idle
-                        } else {
-                            RuntimeStatus::Thinking
-                        });
+                        if is_cancel {
+                            entry.status = Some(RuntimeStatus::Idle);
+                        } else if key.code == KeyCode::Enter {
+                            entry.status = Some(RuntimeStatus::Thinking);
+                        }
                     }
                 }
             }

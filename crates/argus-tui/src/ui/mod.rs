@@ -1,3 +1,4 @@
+pub mod blink;
 pub mod hitmap;
 pub mod layout;
 pub mod modal;

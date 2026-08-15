@@ -2,7 +2,10 @@ mod app;
 mod event;
 mod icons;
 mod notification;
+#[cfg(windows)]
+mod paste_coalesce;
 mod runtime;
+mod scroll_coalesce;
 mod text_input;
 mod ui;
 
@@ -13,7 +16,7 @@ use std::time::Duration;
 use base64::Engine;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyEventKind,
+    EventStream, KeyEventKind, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -191,6 +194,31 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
+/// Applies one terminal `Event` to `state` — the same handling the main
+/// loop's `select!` arm used to do inline. Pulled out so a Windows paste
+/// burst's leftover "boundary" event (see `paste_coalesce`), replayed from
+/// `paste_lookahead` on the next loop iteration, goes through identical
+/// handling to a freshly-read event instead of a second, drifting copy of
+/// this match.
+fn dispatch_terminal_event(state: &mut AppState, hitmap: &ui::HitMap, event: Event) {
+    match event {
+        Event::Key(key) => {
+            if key.kind != KeyEventKind::Release {
+                state.on_key(key);
+            }
+        }
+        Event::Mouse(mouse) => state.on_mouse(mouse, hitmap),
+        Event::Paste(text) => state.on_paste(text),
+        Event::Resize(cols, rows) => {
+            let full = ratatui::layout::Rect::new(0, 0, cols, rows);
+            let regions = ui::layout::compute(full, state.sidebar_width);
+            let content_size = ui::layout::pty_content_size(regions.terminal);
+            state.set_terminal_size(content_size.0, content_size.1);
+        }
+        _ => {}
+    }
+}
+
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     mut resumed_rx: mpsc::UnboundedReceiver<()>,
@@ -215,8 +243,27 @@ async fn run(
     let mut events = EventStream::new();
     let mut hitmap = ui::HitMap::default();
     let mut mouse_capture_enabled = state.mouse_capture_enabled;
+    // Populated only on Windows, by `paste_coalesce::drain_paste_burst`
+    // when it drains one event too many while probing for a paste burst —
+    // drained here, before the next real `events.next()`, so that event
+    // isn't lost or reordered. Always empty elsewhere.
+    #[cfg(windows)]
+    let mut paste_lookahead: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
+    // Populated by `scroll_coalesce::drain_scroll_burst` when it drains a
+    // non-scroll event while netting a wheel flick — drained here, before
+    // the next real `events.next()`, so that event isn't lost or reordered.
+    let mut scroll_lookahead: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
 
     loop {
+        #[cfg(windows)]
+        while let Some(event) = paste_lookahead.pop_front() {
+            dispatch_terminal_event(&mut state, &hitmap, event);
+        }
+        while let Some(event) = scroll_lookahead.pop_front() {
+            dispatch_terminal_event(&mut state, &hitmap, event);
+        }
+
+        state.sync_focused_read();
         terminal.draw(|f| {
             hitmap = ui::draw(f, &state);
         })?;
@@ -264,24 +311,33 @@ async fn run(
             }
             maybe_event = events.next() => {
                 match maybe_event {
+                    #[cfg(windows)]
+                    Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                        match paste_coalesce::seed_char(&key) {
+                            Some(c) => {
+                                let text = paste_coalesce::drain_paste_burst(&mut events, c, &mut paste_lookahead).await;
+                                if text.chars().count() > 1 {
+                                    state.on_paste(text);
+                                } else {
+                                    state.on_key(key);
+                                }
+                            }
+                            None => state.on_key(key),
+                        }
+                    }
                     Some(Ok(Event::Key(key))) => {
                         if key.kind != KeyEventKind::Release {
                             state.on_key(key);
                         }
                     }
-                    Some(Ok(Event::Mouse(mouse))) => {
-                        state.on_mouse(mouse, &hitmap);
+                    Some(Ok(Event::Mouse(mouse)))
+                        if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) =>
+                    {
+                        let (ticks, last, lookahead) = scroll_coalesce::drain_scroll_burst(&mut events, mouse).await;
+                        scroll_lookahead.extend(lookahead);
+                        state.on_scroll_burst(&hitmap, last, ticks);
                     }
-                    Some(Ok(Event::Paste(text))) => {
-                        state.on_paste(text);
-                    }
-                    Some(Ok(Event::Resize(cols, rows))) => {
-                        let full = ratatui::layout::Rect::new(0, 0, cols, rows);
-                        let regions = ui::layout::compute(full, state.sidebar_width);
-                        let content_size = ui::layout::pty_content_size(regions.terminal);
-                        state.set_terminal_size(content_size.0, content_size.1);
-                    }
-                    Some(Ok(_)) => {}
+                    Some(Ok(event)) => dispatch_terminal_event(&mut state, &hitmap, event),
                     Some(Err(e)) => return Err(e.into()),
                     None => return Ok(()),
                 }
