@@ -746,7 +746,6 @@ impl AppState {
                 .iter()
                 .find(|(r, _)| hitmap::hit(*r, mouse.column, mouse.row))
                 .map(|(_, id)| *id);
-            return;
         }
         let content = Self::terminal_content_rect(hitmap);
 
@@ -757,9 +756,20 @@ impl AppState {
         // content rect belongs to it, not to Argus. `forwarding_mouse` keeps
         // that true for the rest of a press even if a drag strays outside
         // `content`, so the child never sees a press with no matching
-        // release.
+        // release. Bare hover motion (no button held) is only forwarded when
+        // the child asked for `AnyMotion` (mode 1003) specifically — a child
+        // that only asked for click/drag tracking never expects hover
+        // reports, e.g. hover-highlighted buttons.
         let over_content = hitmap::hit(content, mouse.column, mouse.row);
-        if self.forwarding_mouse || (over_content && self.focused_wants_mouse()) {
+        let wants_this_event = if mouse.kind == MouseEventKind::Moved {
+            self.focused_wants_motion()
+        } else {
+            self.focused_wants_mouse()
+        };
+        if mouse.kind == MouseEventKind::Moved && !(over_content && wants_this_event) {
+            return;
+        }
+        if self.forwarding_mouse || (over_content && wants_this_event) {
             match mouse.kind {
                 MouseEventKind::Down(_) => self.forwarding_mouse = true,
                 MouseEventKind::Up(_) => self.forwarding_mouse = false,
@@ -807,6 +817,19 @@ impl AppState {
             })
     }
 
+    /// Whether the focused session asked for `AnyMotion` (mode `1003`)
+    /// specifically — the mode that reports mouse movement even with no
+    /// button held, which is what drives hover-highlight UI (e.g. `claude`
+    /// highlighting a button under the cursor). `ButtonMotion` (`1002`) and
+    /// weaker modes only ever expect click/drag reports, so bare hover is
+    /// withheld from them.
+    fn focused_wants_motion(&self) -> bool {
+        self.focused_session_id().and_then(|id| self.sessions.get(&id)).is_some_and(|entry| {
+            entry.parser.screen().mouse_protocol_mode() == vt100::MouseProtocolMode::AnyMotion
+                && entry.parser.screen().mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Sgr
+        })
+    }
+
     /// Forwards `mouse` to the focused session as a standard SGR mouse
     /// report (`ESC [ < Cb ; Cx ; Cy M`/`m`), the same encoding any real
     /// terminal emulator sends once an app has requested mouse tracking.
@@ -828,9 +851,10 @@ impl AppState {
 
     /// Maps a crossterm `MouseEventKind` to its SGR `(button code, is
     /// release)` pair — `Drag` adds the `32` motion offset xterm uses to
-    /// distinguish a move-while-held from a fresh press, and wheel ticks are
-    /// their own pseudo-buttons (`64`/`65`/`66`/`67`) that are always
-    /// "presses", never released.
+    /// distinguish a move-while-held from a fresh press, `Moved` reports the
+    /// same motion offset with the "no button" base code (`3`) since it's a
+    /// hover with nothing held, and wheel ticks are their own pseudo-buttons
+    /// (`64`/`65`/`66`/`67`) that are always "presses", never released.
     fn sgr_mouse_button(kind: MouseEventKind) -> Option<(u8, bool)> {
         let base = |b: MouseButton| match b {
             MouseButton::Left => 0,
@@ -841,11 +865,11 @@ impl AppState {
             MouseEventKind::Down(b) => Some((base(b), false)),
             MouseEventKind::Drag(b) => Some((base(b) + 32, false)),
             MouseEventKind::Up(b) => Some((base(b), true)),
+            MouseEventKind::Moved => Some((3 + 32, false)),
             MouseEventKind::ScrollUp => Some((64, false)),
             MouseEventKind::ScrollDown => Some((65, false)),
             MouseEventKind::ScrollLeft => Some((66, false)),
             MouseEventKind::ScrollRight => Some((67, false)),
-            MouseEventKind::Moved => None,
         }
     }
 
