@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::env::{HomeDirResolver, PlatformHomeDirResolver};
+
 /// One `claude` CLI process's live state, as Claude Code itself maintains it
 /// at `~/.claude/sessions/<pid>.json` — one JSON object per file, rewritten
 /// in place on every status/name change (including `/rename`). Only the
@@ -15,10 +17,10 @@ struct ClaudeSessionFile {
 }
 
 /// `~/.claude/sessions`, Argus's window into Claude Code's own session
-/// state. `None` when `HOME` can't be resolved (matches the rest of the
-/// codebase's Unix-only assumption — see `env::UnixLoginShellPathResolver`).
+/// state. `None` when the home directory can't be resolved (see
+/// `PlatformHomeDirResolver`).
 pub fn claude_sessions_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude/sessions"))
+    PlatformHomeDirResolver.home_dir().map(|home| home.join(".claude/sessions"))
 }
 
 /// Reads every `~/.claude/sessions/*.json`, returning `(sessionId, name)`

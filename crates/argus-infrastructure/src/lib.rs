@@ -6,7 +6,7 @@ pub mod hooks;
 pub mod pty;
 
 pub use claude_sessions::{claude_sessions_dir, read_claude_session_names};
-pub use env::PlatformPathResolver;
+pub use env::{HomeDirResolver, PlatformHomeDirResolver, PlatformPathResolver};
 pub use fs::{NotifyWatcherAdapter, StdFsAdapter};
 pub use git::GitCliAdapter;
 pub use hooks::{HookEventKind, HookServer};

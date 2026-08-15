@@ -13,8 +13,8 @@ use argus_application::use_cases::{
 use argus_application::WorkspaceManager;
 use argus_domain::{SessionId, WorkspaceId};
 use argus_infrastructure::{
-    claude_sessions_dir, GitCliAdapter, HookServer, NotifyWatcherAdapter, PlatformPathResolver,
-    PortablePtyAdapter, StdFsAdapter,
+    claude_sessions_dir, GitCliAdapter, HomeDirResolver, HookServer, NotifyWatcherAdapter,
+    PlatformHomeDirResolver, PlatformPathResolver, PortablePtyAdapter, StdFsAdapter,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
@@ -30,8 +30,8 @@ use crate::event::AppEvent;
 /// if the log itself can't be written, there's nothing more useful to do.
 fn log_watch_failure(what: &str, err: &argus_application::ports::WatchError) {
     use std::io::Write;
-    let Some(home) = std::env::var_os("HOME") else { return };
-    let path = PathBuf::from(home).join(".claude/argus-watch-errors.log");
+    let Some(home) = PlatformHomeDirResolver.home_dir() else { return };
+    let path = home.join(".claude/argus-watch-errors.log");
     let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
         return;
     };
