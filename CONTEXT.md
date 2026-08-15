@@ -21,9 +21,15 @@ _Avoid_: Agent, Terminal — "Terminal" is the panel that renders a Session, not
 itself.
 
 **Session Runtime Status**:
-Whether a Session's `claude` process is actively working on a prompt (`Thinking`) or waiting
-for input (`Idle`), shown as a dot on its card/cell. Derived from Claude Code's own
-`UserPromptSubmit`/`Stop` hooks calling back into argus, not by parsing PTY output. Distinct
+Whether a Session's `claude` process is actively working on a prompt (`Thinking`), sitting
+idle between prompts (`Idle`), or blocked on a user decision (`Waiting` — a tool permission
+prompt or an option picker), shown as a dot/diamond on its card/cell. Derived from Claude
+Code's own `UserPromptSubmit`/`Stop`/`Notification` hooks calling back into argus, not by
+parsing PTY output. The `Notification` hook is matcher-scoped to only the notification types
+that genuinely block on a decision (`permission_prompt`, `elicitation_dialog`,
+`elicitation_url_dialog`, `agent_needs_input`) — Claude Code's other notification types, most
+importantly `idle_prompt` (a ~60s-idle reminder with nothing pending), are deliberately left
+unmatched so a merely-idle Session never gets misreported as `Waiting` (see ADR-0012). Distinct
 from a Session's `Close confirmation` status (Starting/Running/.../Terminating) — this is about
 what the process is *doing*, not whether it's alive.
 _Avoid_: Session Status (collides with the close-confirmation status).

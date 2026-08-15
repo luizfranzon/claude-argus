@@ -31,8 +31,14 @@ pub enum CreateSessionError {
 /// `HookCallbackPort`'s URL with `sessionId`/`event` query params, letting
 /// the frontend show a "thinking"/"idle"/"waiting" status per Session
 /// without parsing PTY output (see docs/adr's status-capture note).
-/// `Notification` fires whenever Claude Code blocks on the user — a tool
-/// permission prompt or a proposed-response/option picker alike.
+/// `Notification` is scoped with a `matcher` to the four notification types
+/// that actually block on a user decision (`permission_prompt`,
+/// `elicitation_dialog`, `elicitation_url_dialog`, `agent_needs_input`).
+/// Claude Code's other five notification types — most importantly
+/// `idle_prompt`, fired ~60s after Claude goes idle purely as a reminder,
+/// with no decision pending — are deliberately left unmatched so they never
+/// call back into argus at all, leaving the Session's status wherever the
+/// last `Stop`/`UserPromptSubmit` hook put it. See ADR-0012.
 pub struct CreateSessionUseCase<Pty: PtyPort, Hooks: HookCallbackPort> {
     manager: Arc<Mutex<WorkspaceManager>>,
     pty: Arc<Pty>,
@@ -138,6 +144,7 @@ fn hook_args(session_id: SessionId, callback_url: String) -> Vec<String> {
                 }],
             }],
             "Notification": [{
+                "matcher": "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input",
                 "hooks": [{
                     "type": "command",
                     "command": hook_command(&callback_url, session_id, "notification"),
@@ -218,6 +225,48 @@ mod tests {
         assert!(args[3].contains("Stop"));
         assert!(args[3].contains("Notification"));
         assert!(args[3].contains("http://127.0.0.1:9999/hook"));
+    }
+
+    #[tokio::test]
+    async fn scopes_the_notification_hook_to_blocking_notification_types_only() {
+        let manager = Arc::new(Mutex::new(WorkspaceManager::new()));
+        let workspace = Workspace::new(WorkspaceId::new(), PathBuf::from("/tmp/project"));
+        let workspace_id = workspace.id;
+        manager.lock().unwrap().register(workspace);
+        let pty = Arc::new(FakePtyPort::new());
+        let use_case = use_case(Arc::clone(&manager), Arc::clone(&pty));
+
+        let (on_output, on_exit) = noop_sinks();
+        use_case
+            .execute(workspace_id, None, on_output, on_exit)
+            .await
+            .unwrap();
+
+        let args = pty.last_args().expect("a spawn was recorded");
+        let settings: serde_json::Value = serde_json::from_str(&args[3]).unwrap();
+        let matcher = settings["hooks"]["Notification"][0]["matcher"]
+            .as_str()
+            .expect("Notification hook has a matcher");
+
+        // The four notification types that block on a real user decision.
+        for blocking in [
+            "permission_prompt",
+            "elicitation_dialog",
+            "elicitation_url_dialog",
+            "agent_needs_input",
+        ] {
+            assert!(
+                matcher.split('|').any(|part| part == blocking),
+                "matcher {matcher:?} should include {blocking:?}"
+            );
+        }
+
+        // idle_prompt (the idle-timeout reminder) must stay unmatched, or a
+        // session that's simply been sitting idle would flip to Waiting.
+        assert!(
+            !matcher.split('|').any(|part| part == "idle_prompt"),
+            "matcher {matcher:?} must not include idle_prompt"
+        );
     }
 
     #[tokio::test]
