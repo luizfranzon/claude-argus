@@ -5,7 +5,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::app::WorkspaceEntry;
+use crate::i18n::t;
 use crate::ui::hitmap::HitMap;
 
 /// Shows the pending commit message, if any (the only thing this row still
@@ -13,7 +16,7 @@ use crate::ui::hitmap::HitMap;
 fn hints_line(entry: &WorkspaceEntry) -> Line<'static> {
     if !entry.git.commit_message.is_empty() {
         return Line::from(vec![
-            Span::raw("mensagem: "),
+            Span::raw(t("sidebar.git.message_label", &[])),
             Span::raw(entry.git.commit_message.clone()),
         ])
         .style(Style::default().fg(Color::DarkGray));
@@ -28,8 +31,14 @@ fn hints_line(entry: &WorkspaceEntry) -> Line<'static> {
 /// doesn't fit the remaining space on a row wraps early) — the `+ 1` is
 /// slack against that, cheaper than actually replicating the wrap algorithm
 /// just to measure it.
+///
+/// Uses each span's *display width* (`unicode-width`), not its char count —
+/// `entry.git.commit_message` is arbitrary user-authored text, and a CJK
+/// commit message's characters each occupy 2 terminal columns, so counting
+/// characters instead of columns would undercount the rows this line
+/// actually needs to wrap into.
 fn wrapped_height(line: &Line, width: u16) -> u16 {
-    let len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    let len: usize = line.spans.iter().map(|s| s.content.width()).sum();
     let width = width.max(1) as usize;
     (len.div_ceil(width)).max(1) as u16 + 1
 }
@@ -48,14 +57,14 @@ fn status_letter(kind: FileStatusKind) -> (&'static str, Color) {
 pub fn draw(f: &mut Frame, area: Rect, entry: &WorkspaceEntry, hitmap: &mut HitMap) {
     if entry.git.available == Some(false) {
         f.render_widget(
-            Paragraph::new("git não está instalado").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(t("sidebar.git.not_installed", &[])).style(Style::default().fg(Color::DarkGray)),
             area,
         );
         return;
     }
     let Some(repo) = entry.git.active_repo() else {
         f.render_widget(
-            Paragraph::new("não é um repositório git").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(t("sidebar.git.not_a_repo", &[])).style(Style::default().fg(Color::DarkGray)),
             area,
         );
         return;
@@ -111,7 +120,7 @@ fn draw_status(
 ) {
     if repo.status.is_empty() {
         f.render_widget(
-            Paragraph::new("sem mudanças").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(t("sidebar.git.no_changes", &[])).style(Style::default().fg(Color::DarkGray)),
             area,
         );
         return;
@@ -144,7 +153,7 @@ fn draw_status(
 fn draw_log(f: &mut Frame, area: Rect, repo: &crate::app::GitRepoState) {
     if repo.log.is_empty() {
         f.render_widget(
-            Paragraph::new("carregando histórico…").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(t("sidebar.git.loading_log", &[])).style(Style::default().fg(Color::DarkGray)),
             area,
         );
         return;

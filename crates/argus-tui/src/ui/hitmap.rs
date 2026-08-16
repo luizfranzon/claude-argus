@@ -20,6 +20,10 @@ pub struct HitMap {
     /// `(row, absolute index into GitRepoState::status, file path, staged)`.
     pub git_rows: Vec<(Rect, usize, String, bool)>,
     pub terminal_area: Rect,
+    /// The active sidebar tab's content rect (inside its border) — used to
+    /// route mouse-wheel scroll to the sidebar (e.g. moving the Explorer
+    /// selection) when the cursor is over it but not over any specific row.
+    pub sidebar_content_area: Rect,
     /// `(close-button cell, notification id)` — one per visible toast, filled
     /// while drawing the notification stack.
     pub notification_close: Vec<(Rect, u64)>,

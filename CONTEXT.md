@@ -124,3 +124,18 @@ The text a file/folder drag from the File Explorer inserts into a Workspace's Te
 path relative to that Workspace's root, quoted only if it contains spaces or shell-special
 characters. Inserted at the cursor (`term.paste`), never executed — the user still presses
 Enter themselves.
+
+**Locale**:
+The language argus's own UI (key hints, modal copy, status/notification text) renders in —
+distinct from any language the user's `claude` process or shell happens to use, which argus
+never touches. Resolved once at startup: detected from the OS, overridable by the user,
+falling back to Portuguese if neither names a language argus ships (see ADR-0015).
+_Avoid_: Language (bare) — reserve "Locale" for argus's own UI; a Workspace's programming
+language or a Session's spoken-language output is not this.
+
+**Translation Key**:
+The stable identifier argus's UI code looks up to render a piece of UI text in the active
+Locale — named for the domain action it represents (e.g. "creating a Session", "confirming a
+Workspace close"), not for the screen or widget currently displaying it, so reorganizing the
+UI doesn't require renaming keys. Every Translation Key must resolve in every Locale argus
+ships; there is no such thing as a partially-translated Locale (see ADR-0015).

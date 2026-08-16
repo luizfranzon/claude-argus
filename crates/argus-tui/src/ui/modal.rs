@@ -5,78 +5,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::Modal;
-
-/// Dark-navy fill for the modal body — deliberately a shade darker than
-/// whatever the terminal's own background is, so the popup reads as a
-/// distinct surface rather than a transparent box outline.
-const MODAL_BG: Color = Color::Rgb(13, 17, 28);
-/// Slightly lighter band behind the title row, same idea as the reference
-/// TUI's title bar.
-const TITLE_BG: Color = Color::Rgb(30, 41, 59);
-const BORDER: Color = Color::Cyan;
-const KEY: Color = Color::Cyan;
-const HINT: Color = Color::DarkGray;
-
-/// How much of each cell's original brightness survives the dim — lower is
-/// darker. Applied to everything already drawn this frame (topbar, sidebar,
-/// terminal, statusbar) outside `popup`, so the modal reads as the one thing
-/// in focus. Ratatui cells have no real alpha channel, so this fakes it by
-/// scaling each cell's actual RGB toward black in place.
-const DIM_FACTOR: f32 = 0.35;
-
-fn dim_backdrop(f: &mut Frame, area: Rect, popup: Rect) {
-    let buf = f.buffer_mut();
-    for y in area.y..area.y.saturating_add(area.height) {
-        for x in area.x..area.x.saturating_add(area.width) {
-            let inside_popup = x >= popup.x
-                && x < popup.x.saturating_add(popup.width)
-                && y >= popup.y
-                && y < popup.y.saturating_add(popup.height);
-            if inside_popup {
-                continue;
-            }
-            let Some(cell) = buf.cell_mut((x, y)) else { continue };
-            cell.fg = dim(cell.fg);
-            cell.bg = dim(cell.bg);
-        }
-    }
-}
-
-fn dim(color: Color) -> Color {
-    let (r, g, b) = to_rgb(color);
-    Color::Rgb(
-        (f32::from(r) * DIM_FACTOR) as u8,
-        (f32::from(g) * DIM_FACTOR) as u8,
-        (f32::from(b) * DIM_FACTOR) as u8,
-    )
-}
-
-/// Approximates every named/indexed `Color` variant as RGB so it can be
-/// scaled uniformly — this app's own styles are almost all `Color::Rgb(..)`
-/// already, but named ANSI colors (`Cyan`, `DarkGray`, …) still show up here
-/// and there and need *some* real triplet to dim consistently.
-fn to_rgb(color: Color) -> (u8, u8, u8) {
-    match color {
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Black => (0, 0, 0),
-        Color::Red => (205, 0, 0),
-        Color::Green => (0, 205, 0),
-        Color::Yellow => (205, 205, 0),
-        Color::Blue => (0, 0, 238),
-        Color::Magenta => (205, 0, 205),
-        Color::Cyan => (0, 205, 205),
-        Color::Gray => (229, 229, 229),
-        Color::DarkGray => (127, 127, 127),
-        Color::LightRed => (255, 0, 0),
-        Color::LightGreen => (0, 255, 0),
-        Color::LightYellow => (255, 255, 0),
-        Color::LightBlue => (92, 92, 255),
-        Color::LightMagenta => (255, 0, 255),
-        Color::LightCyan => (0, 255, 255),
-        Color::White => (255, 255, 255),
-        _ => (40, 40, 40),
-    }
-}
+use crate::i18n::t;
+use crate::ui::overlay::{dim_backdrop, BORDER, HINT, KEY, SURFACE_BG as MODAL_BG, TITLE_BG};
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [area] = Layout::horizontal([Constraint::Length(width)]).flex(Flex::Center).areas(area);
@@ -134,17 +64,17 @@ fn footer(is_prompt: bool) -> Paragraph<'static> {
         vec![
             Span::raw(" "),
             Span::styled("Enter", key_style),
-            Span::styled(" confirma  ", hint_style),
+            Span::styled(format!(" {}  ", t("modal.footer.confirm", &[])), hint_style),
             Span::styled("Esc", key_style),
-            Span::styled(" cancela", hint_style),
+            Span::styled(format!(" {}", t("modal.footer.cancel", &[])), hint_style),
         ]
     } else {
         vec![
             Span::raw(" "),
             Span::styled("y", key_style),
-            Span::styled(" confirma  ", hint_style),
-            Span::styled("outra tecla", key_style),
-            Span::styled(" cancela", hint_style),
+            Span::styled(format!(" {}  ", t("modal.footer.confirm", &[])), hint_style),
+            Span::styled(t("modal.footer.other_key", &[]), key_style),
+            Span::styled(format!(" {}", t("modal.footer.cancel", &[])), hint_style),
         ]
     };
     Paragraph::new(Line::from(spans)).style(Style::default().bg(MODAL_BG))
@@ -152,41 +82,45 @@ fn footer(is_prompt: bool) -> Paragraph<'static> {
 
 fn describe(modal: &Modal) -> (String, String, bool) {
     match modal {
-        Modal::NewWorkspacePath { input } => {
-            ("Novo workspace".into(), format!("Caminho do diretório:\n{input}_"), true)
-        }
-        Modal::RenameSession { input, .. } => {
-            ("Renomear sessão".into(), format!("Novo nome:\n{input}_"), true)
-        }
+        Modal::NewWorkspacePath { input } => (
+            t("modal.new_workspace.title", &[]),
+            t("modal.new_workspace.body", &[("input", input)]),
+            true,
+        ),
+        Modal::RenameSession { input, .. } => (
+            t("modal.rename_session.title", &[]),
+            t("modal.rename_session.body", &[("input", input)]),
+            true,
+        ),
         Modal::NewFile { dir, input, .. } => (
-            "Novo arquivo".into(),
-            format!("Nome em {}:\n{input}_", dir.display()),
+            t("modal.new_file.title", &[]),
+            t("modal.new_file.body", &[("dir", &dir.display().to_string()), ("input", input)]),
             true,
         ),
         Modal::NewDir { dir, input, .. } => (
-            "Nova pasta".into(),
-            format!("Nome em {}:\n{input}_", dir.display()),
+            t("modal.new_dir.title", &[]),
+            t("modal.new_dir.body", &[("dir", &dir.display().to_string()), ("input", input)]),
             true,
         ),
         Modal::RenamePath { from, input, .. } => (
-            "Renomear".into(),
-            format!("Novo nome para {}:\n{input}_", from.display()),
+            t("modal.rename_path.title", &[]),
+            t("modal.rename_path.body", &[("from", &from.display().to_string()), ("input", input)]),
             true,
         ),
-        Modal::CommitMessage { input, .. } => {
-            ("Commit".into(), format!("Mensagem:\n{input}_"), true)
-        }
-        Modal::ConfirmCloseSession { .. } => {
-            ("Fechar sessão".into(), "Encerrar esta sessão e seu processo claude?".into(), false)
-        }
-        Modal::ConfirmCloseWorkspace { .. } => (
-            "Fechar workspace".into(),
-            "Encerrar o workspace e todas as suas sessões?".into(),
-            false,
+        Modal::CommitMessage { input, .. } => (
+            t("modal.commit_message.title", &[]),
+            t("modal.commit_message.body", &[("input", input)]),
+            true,
         ),
+        Modal::ConfirmCloseSession { .. } => {
+            (t("modal.confirm_close_session.title", &[]), t("modal.confirm_close_session.body", &[]), false)
+        }
+        Modal::ConfirmCloseWorkspace { .. } => {
+            (t("modal.confirm_close_workspace.title", &[]), t("modal.confirm_close_workspace.body", &[]), false)
+        }
         Modal::ConfirmDeletePath { path, .. } => (
-            "Excluir".into(),
-            format!("Enviar para a lixeira: {}?", path.display()),
+            t("modal.confirm_delete_path.title", &[]),
+            t("modal.confirm_delete_path.body", &[("path", &path.display().to_string())]),
             false,
         ),
     }

@@ -23,6 +23,9 @@ vt100 = "0.15"
 futures = "0.3"
 anyhow = "1"
 base64 = "0.22"
+nucleo-matcher = "0.3"
+sys-locale = "0.3"
+unicode-width = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"

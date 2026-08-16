@@ -1,3 +1,4 @@
+pub mod file_search_port;
 pub mod fs_port;
 pub mod fs_watch_port;
 pub mod git_port;
@@ -5,6 +6,7 @@ pub mod hook_callback_port;
 pub mod pty_port;
 pub mod shell_env_port;
 
+pub use file_search_port::{FileSearchPort, HighlightedLines, SearchMatch};
 pub use fs_port::{FileEntry, FileSystemPort, FsError};
 pub use fs_watch_port::{FileWatcherPort, WatchCallback, WatchError, WatchHandle};
 pub use git_port::{

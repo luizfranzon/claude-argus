@@ -8,13 +8,14 @@ use argus_application::use_cases::{
     ConfirmCloseError, ConfirmCloseSessionError, ConfirmCloseSessionUseCase,
     ConfirmCloseWorkspaceUseCase, CreateSessionUseCase, CreateWorkspaceUseCase,
     HandleSessionProcessExitUseCase, RequestCloseSessionUseCase, RequestCloseWorkspaceUseCase,
-    ResolveStartupPathUseCase,
+    ResolveStartupPathUseCase, SearchWorkspaceUseCase,
 };
 use argus_application::WorkspaceManager;
 use argus_domain::{SessionId, WorkspaceId};
 use argus_infrastructure::{
     claude_sessions_dir, GitCliAdapter, HomeDirResolver, HookServer, NotifyWatcherAdapter,
-    PlatformHomeDirResolver, PlatformPathResolver, PortablePtyAdapter, StdFsAdapter,
+    PlatformHomeDirResolver, PlatformPathResolver, PortablePtyAdapter, RipgrepSearchAdapter,
+    StdFsAdapter,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
@@ -89,6 +90,7 @@ pub struct Runtime {
     request_close_session: Arc<RequestCloseSessionUseCase>,
     confirm_close_session: Arc<ConfirmCloseSessionUseCase<PortablePtyAdapter>>,
     resolve_startup_path: Arc<ResolveStartupPathUseCase<PlatformPathResolver>>,
+    search_workspace: Arc<SearchWorkspaceUseCase<RipgrepSearchAdapter>>,
     tx: UnboundedSender<AppEvent>,
 }
 
@@ -99,6 +101,7 @@ impl Runtime {
         let fs = Arc::new(StdFsAdapter::new());
         let watcher = Arc::new(NotifyWatcherAdapter::new());
         let git = Arc::new(GitCliAdapter::new());
+        let search_workspace = Arc::new(SearchWorkspaceUseCase::new(Arc::new(RipgrepSearchAdapter::new())));
         let path_resolver = Arc::new(PlatformPathResolver);
         let session_process_exit =
             Arc::new(HandleSessionProcessExitUseCase::new(Arc::clone(&manager)));
@@ -146,6 +149,7 @@ impl Runtime {
             hook_server,
             create_workspace,
             create_session,
+            search_workspace,
             tx,
         })
     }
@@ -360,10 +364,16 @@ impl Runtime {
         let git = Arc::clone(&self.git);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let status = git.status(repo.clone()).await;
-            let branch = git.current_branch(repo.clone()).await;
-            let branches = git.list_branches(repo.clone()).await;
-            let sync = git.sync_status(repo.clone()).await;
+            // Four independent `git` subprocess calls — each pays its own
+            // process-spawn cost, so running them concurrently rather than
+            // one after another cuts the wall-clock latency of a refresh
+            // roughly 4x instead of paying that cost four times over.
+            let (status, branch, branches, sync) = tokio::join!(
+                git.status(repo.clone()),
+                git.current_branch(repo.clone()),
+                git.list_branches(repo.clone()),
+                git.sync_status(repo.clone()),
+            );
             let _ = tx.send(AppEvent::GitRefreshed {
                 workspace_id,
                 repo,
@@ -455,6 +465,73 @@ impl Runtime {
 
     pub fn spawn_git_fetch(&self, workspace_id: WorkspaceId, repo: PathBuf) {
         self.spawn_git_remote_action(workspace_id, repo, "fetch");
+    }
+
+    /// Walks the workspace's file tree for the fuzzy finder's Files-mode
+    /// index, via `SearchWorkspaceUseCase` — see `FileSearchPort` (ADR-0013
+    /// for why this doesn't go through `GitPort` instead).
+    pub fn spawn_index_files(&self, workspace_id: WorkspaceId, root: PathBuf, include_ignored: bool) {
+        let search_workspace = Arc::clone(&self.search_workspace);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let files = search_workspace.index_files(root, include_ignored).await;
+            let _ = tx.send(AppEvent::FinderIndexed { workspace_id, all: include_ignored, files });
+        });
+    }
+
+    /// Runs a Content-mode grep across the workspace via
+    /// `SearchWorkspaceUseCase`. `generation` lets the caller discard a
+    /// result that arrives after the query has already moved on.
+    pub fn spawn_finder_grep(
+        &self,
+        workspace_id: WorkspaceId,
+        root: PathBuf,
+        query: String,
+        include_ignored: bool,
+        generation: u64,
+    ) {
+        let search_workspace = Arc::clone(&self.search_workspace);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(crate::fuzzy_finder::GREP_DEBOUNCE).await;
+            let matches = search_workspace
+                .search_content(root, query, include_ignored)
+                .await
+                .into_iter()
+                .map(|m| crate::fuzzy_finder::FinderMatch {
+                    path: m.path,
+                    indices: Vec::new(),
+                    line: m.line,
+                    line_text: m.line_text,
+                })
+                .collect();
+            let _ = tx.send(AppEvent::FinderSearchResult { workspace_id, generation, matches });
+        });
+    }
+
+    /// Loads a preview of `path`'s contents for the fuzzy finder's preview
+    /// pane. `FileSystemPort` has no partial-read API, so the whole file is
+    /// read first; truncation is pure display formatting and stays on this
+    /// task, while syntax highlighting (real regex-driven parsing work) goes
+    /// through `SearchWorkspaceUseCase`, which dispatches it to a
+    /// blocking-pool thread — running it on the UI loop's own task
+    /// previously froze the whole app for the duration of every preview.
+    pub fn spawn_finder_preview(&self, path: PathBuf, generation: u64) {
+        let fs = Arc::clone(&self.fs);
+        let search_workspace = Arc::clone(&self.search_workspace);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let read_result = fs.read_file(path.clone()).await;
+            let result = match read_result {
+                Ok(contents) => {
+                    let truncated = crate::fuzzy_finder::truncate_preview(&contents);
+                    let highlighted = search_workspace.preview_highlight(path.clone(), truncated.clone()).await;
+                    Ok((truncated, highlighted))
+                }
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(AppEvent::FinderPreviewLoaded { generation, path, result });
+        });
     }
 
     fn spawn_git_remote_action(

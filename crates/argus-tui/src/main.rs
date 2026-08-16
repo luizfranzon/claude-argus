@@ -1,11 +1,14 @@
 mod app;
 mod event;
+mod fuzzy_finder;
+mod i18n;
 mod icons;
 mod notification;
 #[cfg(windows)]
 mod paste_coalesce;
 mod runtime;
 mod scroll_coalesce;
+mod terminal_protocol;
 mod text_input;
 mod ui;
 
@@ -201,18 +204,19 @@ async fn main() -> anyhow::Result<()> {
 /// handling to a freshly-read event instead of a second, drifting copy of
 /// this match.
 fn dispatch_terminal_event(state: &mut AppState, hitmap: &ui::HitMap, event: Event) {
+    state.mark_dirty();
     match event {
         Event::Key(key) => {
             if key.kind != KeyEventKind::Release {
-                state.on_key(key);
+                state.on_key(key, hitmap);
             }
         }
         Event::Mouse(mouse) => state.on_mouse(mouse, hitmap),
         Event::Paste(text) => state.on_paste(text),
         Event::Resize(cols, rows) => {
             let full = ratatui::layout::Rect::new(0, 0, cols, rows);
-            let regions = ui::layout::compute(full, state.sidebar_width);
-            let content_size = ui::layout::pty_content_size(regions.terminal);
+            let regions = ui::layout::compute(full, state.sidebar_width, state.focus_mode);
+            let content_size = ui::layout::pty_content_size(regions.terminal, !state.focus_mode);
             state.set_terminal_size(content_size.0, content_size.1);
         }
         _ => {}
@@ -230,8 +234,8 @@ async fn run(
 
     let size = terminal.size()?;
     let full = ratatui::layout::Rect::new(0, 0, size.width, size.height);
-    let regions = ui::layout::compute(full, ui::layout::DEFAULT_SIDEBAR_WIDTH);
-    let content_size = ui::layout::pty_content_size(regions.terminal);
+    let regions = ui::layout::compute(full, ui::layout::DEFAULT_SIDEBAR_WIDTH, false);
+    let content_size = ui::layout::pty_content_size(regions.terminal, true);
 
     let mut state = AppState::new(rt, content_size);
     state.spawn_initial_workspace(initial_directory());
@@ -243,6 +247,14 @@ async fn run(
     let mut events = EventStream::new();
     let mut hitmap = ui::HitMap::default();
     let mut mouse_capture_enabled = state.mouse_capture_enabled;
+    // Redraws are decoupled from input: every event just updates `state`,
+    // and only this fixed 60Hz tick actually calls `terminal.draw()`. Caps
+    // redraw work at a steady rate instead of one full-frame redraw per
+    // keystroke/PTY chunk (the old behavior), and `Delay` (rather than the
+    // default `Burst`) means a slow iteration pushes the next tick back
+    // instead of firing a catch-up burst of redraws.
+    let mut redraw = tokio::time::interval(Duration::from_millis(16));
+    redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Populated only on Windows, by `paste_coalesce::drain_paste_burst`
     // when it drains one event too many while probing for a paste burst —
     // drained here, before the next real `events.next()`, so that event
@@ -263,39 +275,33 @@ async fn run(
             dispatch_terminal_event(&mut state, &hitmap, event);
         }
 
-        state.sync_focused_read();
-        terminal.draw(|f| {
-            hitmap = ui::draw(f, &state);
-        })?;
-
-        if state.should_quit {
-            return Ok(());
-        }
-
-        if state.mouse_capture_enabled != mouse_capture_enabled {
-            mouse_capture_enabled = state.mouse_capture_enabled;
-            if mouse_capture_enabled {
-                execute!(terminal.backend_mut(), EnableMouseCapture)?;
-            } else {
-                execute!(terminal.backend_mut(), DisableMouseCapture)?;
-            }
-        }
-
-        if let Some(text) = state.clipboard_copy_requested.take() {
-            copy_to_system_clipboard(terminal.backend_mut(), &text)?;
-            spawn_local_clipboard_copy(text);
-        }
-
-        // Fast tick only while a notification is actually mid-animation;
-        // otherwise fall back to the default idle tick.
-        let tick_delay = if state.notifications.is_animating() {
-            Duration::from_millis(10)
-        } else {
-            Duration::from_millis(100)
-        };
-
         tokio::select! {
+            _ = redraw.tick() => {
+                state.tick();
+                state.sync_focused_read();
+                if state.dirty || state.is_animating() {
+                    state.dirty = false;
+                    terminal.draw(|f| {
+                        hitmap = ui::draw(f, &state);
+                    })?;
+                }
+
+                if state.mouse_capture_enabled != mouse_capture_enabled {
+                    mouse_capture_enabled = state.mouse_capture_enabled;
+                    if mouse_capture_enabled {
+                        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+                    } else {
+                        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+                    }
+                }
+
+                if let Some(text) = state.clipboard_copy_requested.take() {
+                    copy_to_system_clipboard(terminal.backend_mut(), &text)?;
+                    spawn_local_clipboard_copy(text);
+                }
+            }
             Some(()) = resumed_rx.recv() => {
+                state.mark_dirty();
                 terminal.clear()?;
                 // SIGTSTP unconditionally disabled mouse capture on the way
                 // out; re-apply whatever the app's flag actually wants and
@@ -307,9 +313,25 @@ async fn run(
                 mouse_capture_enabled = state.mouse_capture_enabled;
             }
             Some(app_event) = rx.recv() => {
+                state.mark_dirty();
                 state.handle_app_event(app_event);
+                // Drain whatever else is already queued (e.g. a burst of
+                // PtyOutput from claude reacting to a scroll flick) before
+                // falling through to the single terminal.draw() below —
+                // otherwise each chunk in the burst gets its own full-frame
+                // redraw. Capped so a long, continuous stream (e.g. a big
+                // response streaming in) can't starve the redraw entirely.
+                for _ in 0..63 {
+                    match rx.try_recv() {
+                        Ok(app_event) => state.handle_app_event(app_event),
+                        Err(_) => break,
+                    }
+                }
             }
             maybe_event = events.next() => {
+                if matches!(maybe_event, Some(Ok(_))) {
+                    state.mark_dirty();
+                }
                 match maybe_event {
                     #[cfg(windows)]
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
@@ -319,15 +341,15 @@ async fn run(
                                 if text.chars().count() > 1 {
                                     state.on_paste(text);
                                 } else {
-                                    state.on_key(key);
+                                    state.on_key(key, &hitmap);
                                 }
                             }
-                            None => state.on_key(key),
+                            None => state.on_key(key, &hitmap),
                         }
                     }
                     Some(Ok(Event::Key(key))) => {
                         if key.kind != KeyEventKind::Release {
-                            state.on_key(key);
+                            state.on_key(key, &hitmap);
                         }
                     }
                     Some(Ok(Event::Mouse(mouse)))
@@ -342,14 +364,10 @@ async fn run(
                     None => return Ok(()),
                 }
             }
-            _ = tokio::time::sleep(tick_delay) => {
-                // periodic redraw tick so hook-status/spinner-like state never
-                // feels stuck between real events, so a stale status-bar
-                // message gets cleared even with no other input arriving, and
-                // so notification fade in/out (see `notification::Notification::alpha`)
-                // animates smoothly — see `tick_delay` above for the fast/slow split
-                state.tick();
-            }
+        }
+
+        if state.should_quit {
+            return Ok(());
         }
     }
 }

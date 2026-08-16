@@ -5,6 +5,7 @@ use ratatui::widgets::{List, ListItem};
 use ratatui::Frame;
 
 use crate::app::{AppState, WorkspaceEntry};
+use crate::i18n::t;
 use crate::icons;
 use crate::ui::hitmap::HitMap;
 use crate::ui::scroll;
@@ -57,7 +58,7 @@ pub fn draw(f: &mut Frame, area: Rect, _app: &AppState, entry: &WorkspaceEntry, 
         .collect();
 
     let list = if items.is_empty() {
-        List::new(vec![ListItem::new("carregando…")])
+        List::new(vec![ListItem::new(t("sidebar.explorer.loading", &[]))])
     } else {
         List::new(items)
     };

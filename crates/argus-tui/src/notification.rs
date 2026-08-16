@@ -121,12 +121,4 @@ impl NotificationCenter {
     pub fn visible(&self) -> impl Iterator<Item = &Notification> {
         self.queue.iter()
     }
-
-    /// Whether any card is currently mid-fade (`alpha` not settled at its
-    /// resting `1.0`) — the main loop uses this to pick a fast redraw tick
-    /// only while an animation is actually running, instead of paying for
-    /// it all the time.
-    pub fn is_animating(&self) -> bool {
-        self.queue.iter().any(|n| n.alpha() < 1.0)
-    }
 }

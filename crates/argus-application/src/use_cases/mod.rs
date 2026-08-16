@@ -6,6 +6,7 @@ pub mod handle_process_exit;
 pub mod request_close_session;
 pub mod request_close_workspace;
 pub mod resolve_startup_path;
+pub mod search_workspace;
 
 pub use confirm_close_session::{
     ConfirmCloseError as ConfirmCloseSessionError, ConfirmCloseSessionUseCase,
@@ -17,3 +18,4 @@ pub use handle_process_exit::HandleSessionProcessExitUseCase;
 pub use request_close_session::RequestCloseSessionUseCase;
 pub use request_close_workspace::{CloseDecision, RequestCloseWorkspaceUseCase};
 pub use resolve_startup_path::ResolveStartupPathUseCase;
+pub use search_workspace::SearchWorkspaceUseCase;

@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{AppState, Focus, SidebarTab};
+use crate::i18n::t;
 use crate::ui::hitmap::HitMap;
 use crate::ui::layout::equal_columns;
 
@@ -21,7 +22,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &AppState, hitmap: &mut HitMap) {
     draw_tabs(f, chunks[0], app, hitmap);
 
     let Some(entry) = app.active_entry() else {
-        let placeholder = Paragraph::new("Sem workspace ativo — w para abrir um diretório")
+        let placeholder = Paragraph::new(t("sidebar.placeholder.no_workspace", &[]))
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL));
         f.render_widget(placeholder, chunks[1]);
@@ -38,6 +39,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &AppState, hitmap: &mut HitMap) {
     let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(border_color));
     let inner = block.inner(chunks[1]);
     f.render_widget(block, chunks[1]);
+    hitmap.sidebar_content_area = inner;
 
     match entry.sidebar_tab {
         SidebarTab::Agents => agents::draw(f, inner, app, entry, hitmap),
@@ -48,7 +50,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &AppState, hitmap: &mut HitMap) {
 
 fn draw_tabs(f: &mut Frame, area: Rect, app: &AppState, hitmap: &mut HitMap) {
     let active_tab = app.active_entry().map(|w| w.sidebar_tab);
-    let labels = [("1 Agents", SidebarTab::Agents), ("2 Explorer", SidebarTab::Explorer), ("3 Git", SidebarTab::Git)];
+    let labels = [
+        (t("sidebar.tabs.agents", &[]), SidebarTab::Agents),
+        (t("sidebar.tabs.explorer", &[]), SidebarTab::Explorer),
+        (t("sidebar.tabs.git", &[]), SidebarTab::Git),
+    ];
     let columns = equal_columns(area, labels.len());
 
     for (col, (label, tab)) in columns.iter().zip(labels.iter()) {

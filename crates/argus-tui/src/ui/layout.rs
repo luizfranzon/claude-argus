@@ -14,10 +14,27 @@ pub struct Regions {
     pub statusbar: Rect,
 }
 
-pub fn compute(full: Rect, sidebar_width: u16) -> Regions {
+/// Computes the frame's regions. When `focus_mode` is set, the topbar and
+/// sidebar are collapsed to nothing and the terminal pane takes the whole
+/// frame above the status line — see ADR/Focus Mode design: everything but
+/// the currently-focused session and the status line is hidden.
+pub fn compute(full: Rect, sidebar_width: u16, focus_mode: bool) -> Regions {
+    if focus_mode {
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(full);
+        return Regions {
+            topbar: Rect::default(),
+            sidebar: Rect::default(),
+            terminal: vertical[0],
+            statusbar: vertical[1],
+        };
+    }
+
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
+        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(2)])
         .split(full);
 
     let body = Layout::default()
@@ -48,10 +65,15 @@ pub fn clamp_sidebar_width(width: u16, full_width: u16) -> u16 {
     width.clamp(MIN_SIDEBAR_WIDTH, max)
 }
 
-/// The PTY content size for a given terminal pane `Rect` — one cell of
-/// border on every side (see `ui::terminal`'s `Block::bordered()`).
-pub fn pty_content_size(terminal_area: Rect) -> (u16, u16) {
-    (terminal_area.width.saturating_sub(2), terminal_area.height.saturating_sub(2))
+/// The PTY content size for a given terminal pane `Rect`. `bordered` should
+/// be `false` in Focus Mode, where `ui::terminal` skips the
+/// `Block::bordered()` wrapper and the session gets the full `terminal_area`.
+pub fn pty_content_size(terminal_area: Rect, bordered: bool) -> (u16, u16) {
+    if bordered {
+        (terminal_area.width.saturating_sub(2), terminal_area.height.saturating_sub(2))
+    } else {
+        (terminal_area.width, terminal_area.height)
+    }
 }
 
 /// Splits `area` into `n` equal-width horizontal columns — shared by every

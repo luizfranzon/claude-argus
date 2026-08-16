@@ -1,10 +1,11 @@
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem};
+use ratatui::widgets::{List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{AppState, RuntimeStatus, WorkspaceEntry};
+use crate::i18n::t;
 use crate::ui::hitmap::HitMap;
 use crate::ui::scroll;
 use crate::ui::blink;
@@ -24,6 +25,20 @@ fn spinner_frame() -> char {
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &AppState, entry: &WorkspaceEntry, hitmap: &mut HitMap) {
+    if entry.sessions.is_empty() {
+        let target = Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(1) / 2,
+            width: area.width,
+            height: 1.min(area.height),
+        };
+        let paragraph = Paragraph::new(t("sidebar.agents.empty", &[]))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(paragraph, target);
+        return;
+    }
+
     let (visible, offset, visible_selected) =
         scroll::window(&entry.sessions, entry.agents_selected, area.height as usize);
     let items: Vec<ListItem> = visible
@@ -71,10 +86,5 @@ pub fn draw(f: &mut Frame, area: Rect, app: &AppState, entry: &WorkspaceEntry, h
         })
         .collect();
 
-    let list = if items.is_empty() {
-        List::new(vec![ListItem::new("nenhuma sessão — n cria uma")])
-    } else {
-        List::new(items)
-    };
-    f.render_widget(list, area);
+    f.render_widget(List::new(items), area);
 }

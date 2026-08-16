@@ -2,13 +2,14 @@
 //! keeps `argus-application`'s real dependency tree free of test-only code.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 
 use crate::ports::{
-    EnvResolutionError, ExitReason, HookCallbackPort, PtyError, PtyHandleId, PtyPort,
-    ShellEnvironmentResolver, SpawnSpec,
+    EnvResolutionError, ExitReason, FileSearchPort, HighlightedLines, HookCallbackPort, PtyError,
+    PtyHandleId, PtyPort, SearchMatch, ShellEnvironmentResolver, SpawnSpec,
 };
 
 #[derive(Default)]
@@ -102,6 +103,50 @@ impl ShellEnvironmentResolver for FakeShellEnvironmentResolver {
     async fn resolve_path(&self) -> Result<String, EnvResolutionError> {
         *self.call_count.lock().unwrap() += 1;
         self.result.clone()
+    }
+}
+
+/// Fake `FileSearchPort` for `SearchWorkspaceUseCase` tests — returns
+/// canned results and records every call so assertions can check both.
+#[derive(Default)]
+pub struct FakeFileSearchPort {
+    files: Vec<PathBuf>,
+    matches: Vec<SearchMatch>,
+    highlight: Option<HighlightedLines>,
+    walk_calls: Mutex<Vec<(PathBuf, bool)>>,
+}
+
+impl FakeFileSearchPort {
+    pub fn with_files(files: Vec<PathBuf>) -> Self {
+        Self { files, ..Default::default() }
+    }
+
+    pub fn with_matches(matches: Vec<SearchMatch>) -> Self {
+        Self { matches, ..Default::default() }
+    }
+
+    pub fn with_highlight(highlight: Option<HighlightedLines>) -> Self {
+        Self { highlight, ..Default::default() }
+    }
+
+    pub fn walk_calls(&self) -> Vec<(PathBuf, bool)> {
+        self.walk_calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl FileSearchPort for FakeFileSearchPort {
+    async fn walk_files(&self, root: PathBuf, include_ignored: bool) -> Vec<PathBuf> {
+        self.walk_calls.lock().unwrap().push((root, include_ignored));
+        self.files.clone()
+    }
+
+    async fn grep_content(&self, _root: PathBuf, _query: String, _include_ignored: bool) -> Vec<SearchMatch> {
+        self.matches.clone()
+    }
+
+    async fn highlight(&self, _path: PathBuf, _contents: String) -> Option<HighlightedLines> {
+        self.highlight.clone()
     }
 }
 

@@ -18,10 +18,14 @@ pub fn apply_paste(input: &mut String, text: &str) {
     input.extend(text.chars().filter(|c| *c != '\n' && *c != '\r'));
 }
 
-/// The single text-editing keymap every modal in `app.rs` shares: Enter
-/// submits, Esc cancels, Backspace/Char edit `input` in place, anything
-/// else is ignored. One interface for all six `Modal` variants that carry
-/// a free-text `input` field, instead of each re-implementing this match.
+/// The shared text-editing keymap for every `Modal` variant's free-text
+/// `input` field: Enter submits, Esc cancels, Backspace/Char edit `input` in
+/// place, anything else is ignored. One interface for all six `Modal`
+/// variants, instead of each re-implementing this match. The fuzzy finder's
+/// query field does *not* go through this — it interleaves Tab/Ctrl+T/Ctrl+G
+/// with finder-specific Enter/Esc semantics that don't fit a plain
+/// submit/cancel shape, so `app::keys::finder::handle_finder_key` has its
+/// own compound keymap instead.
 pub fn apply(input: &mut String, key: KeyEvent) -> TextInputAction {
     match key.code {
         KeyCode::Enter => TextInputAction::Submit,
