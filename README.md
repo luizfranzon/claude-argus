@@ -74,10 +74,10 @@ Para corrigir:
    aparecem corretamente.
 3. Reabra o terminal e rode `argus` novamente.
 
-### File watching (rename de sessão, File Explorer, Git panel) não atualiza sozinho
+### File watching (rename de sessão, File Explorer) não atualiza sozinho
 
 Argus usa `inotify` para observar `~/.claude/sessions` (rename ao vivo) e a
-raiz de cada workspace (File Explorer, status do Git). Se o limite de
+raiz de cada workspace (File Explorer). Se o limite de
 instâncias `inotify` do seu usuário já estiver esgotado por outros programas
 (editores, watchers de build, GitKraken etc.), o `watch()` falha em silêncio
 com `Too many open files` (`os error 24`) e Argus continua funcionando, só

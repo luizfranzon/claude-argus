@@ -1,11 +1,12 @@
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::Modal;
 use crate::i18n::t;
+use crate::ui::border::Border;
 use crate::ui::overlay::{dim_backdrop, BORDER, HINT, KEY, SURFACE_BG as MODAL_BG, TITLE_BG};
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -21,12 +22,7 @@ pub fn draw(f: &mut Frame, area: Rect, modal: &Modal) {
 
     dim_backdrop(f, area, popup);
     f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER))
-        .style(Style::default().bg(MODAL_BG));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = Border::solid(BORDER).bg(MODAL_BG).render(f, popup);
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -105,11 +101,6 @@ fn describe(modal: &Modal) -> (String, String, bool) {
         Modal::RenamePath { from, input, .. } => (
             t("modal.rename_path.title", &[]),
             t("modal.rename_path.body", &[("from", &from.display().to_string()), ("input", input)]),
-            true,
-        ),
-        Modal::CommitMessage { input, .. } => (
-            t("modal.commit_message.title", &[]),
-            t("modal.commit_message.body", &[("input", input)]),
             true,
         ),
         Modal::ConfirmCloseSession { .. } => {

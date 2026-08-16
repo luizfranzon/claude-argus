@@ -10,7 +10,7 @@ use notify_debouncer_mini::{new_debouncer, Debouncer};
 
 /// Debounce window before `on_change` fires. Long enough to coalesce a whole
 /// `claude` edit burst (many small writes) into one refresh, short enough
-/// that the File Explorer/GitPanel still feel live.
+/// that the File Explorer still feels live.
 const DEBOUNCE: Duration = Duration::from_millis(400);
 
 type RecommendedDebouncer = Debouncer<notify_debouncer_mini::notify::RecommendedWatcher>;

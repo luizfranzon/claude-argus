@@ -4,6 +4,15 @@ use std::path::PathBuf;
 use argus_application::ports::HighlightedLines;
 use argus_domain::WorkspaceId;
 
+use crate::stable_scroll::StableScroll;
+
+/// Identifies what the preview is currently showing: the file, plus which
+/// match's line within it (Content mode only — Files mode previews always
+/// show the top of the file). Two requests for the same subject — e.g. a
+/// background reindex re-showing the same file the user is already looking
+/// at — must not reset the user's scroll; see [`StableScroll`].
+pub type PreviewSubject = (PathBuf, Option<u64>);
+
 /// Caps how many results a single query keeps around — both to keep the
 /// list snappy to render/scroll and because refining the query naturally
 /// narrows a huge result set anyway.
@@ -19,6 +28,19 @@ pub enum FinderMode {
     Files,
     Content,
 }
+
+/// Which pane `Tab` currently routes navigation keys to. `Ctrl+Space` (not
+/// `Tab`) switches [`FinderMode`] — see `app::keys::finder::handle_finder_key`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FinderFocus {
+    #[default]
+    Results,
+    Preview,
+}
+
+/// How many lines `PageUp`/`PageDown` scroll the preview by when it has
+/// focus — arbitrary but reasonable for the finder popup's typical height.
+pub const PREVIEW_PAGE_SIZE: i32 = 10;
 
 /// One row in the results list. `path` is always workspace-relative — the
 /// form both the `@path` insertion and the on-disk lookup (joined onto the
@@ -46,9 +68,17 @@ pub struct FuzzyFinderState {
     pub show_ignored: bool,
     pub results: Vec<FinderMatch>,
     pub selected: usize,
+    pub focus: FinderFocus,
     pub marked: HashSet<PathBuf>,
     pub preview: Option<String>,
     pub preview_path: Option<PathBuf>,
+    /// Extra lines scrolled beyond the preview's auto-centered position
+    /// (positive = further down). Keyed by [`PreviewSubject`] so the offset
+    /// only resets when the file/match actually being previewed changes —
+    /// not on every redundant re-request (e.g. a background reindex keeping
+    /// the same selection) — see `app::keys::finder::request_finder_preview`
+    /// and [`StableScroll`].
+    pub preview_scroll: StableScroll<PreviewSubject>,
     /// Bumped on every query/mode/toggle change; results and previews that
     /// arrive tagged with a stale generation are discarded — the cheap
     /// substitute for actually cancelling the in-flight grep/read task.
@@ -71,9 +101,11 @@ impl FuzzyFinderState {
             show_ignored: false,
             results: Vec::new(),
             selected: 0,
+            focus: FinderFocus::default(),
             marked: HashSet::new(),
             preview: None,
             preview_path: None,
+            preview_scroll: StableScroll::new(),
             search_gen: 0,
             preview_gen: 0,
             preview_highlighted: None,
@@ -87,10 +119,32 @@ impl FuzzyFinderState {
         };
         self.results.clear();
         self.selected = 0;
+        self.preview_scroll.reset();
     }
 
     pub fn toggle_show_ignored(&mut self) {
         self.show_ignored = !self.show_ignored;
+    }
+
+    pub fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            FinderFocus::Results => FinderFocus::Preview,
+            FinderFocus::Preview => FinderFocus::Results,
+        };
+    }
+
+    /// Scrolls the preview by `delta` lines, on top of its auto-centered
+    /// base position — see `preview_scroll`. Negative moves up (toward the
+    /// top of the file), positive moves down. `min`/`max` bound the
+    /// resulting offset so it can't run past either edge of the file — the
+    /// caller passes the previous frame's `HitMap::finder_preview_offset_*`,
+    /// computed by `ui::fuzzy_finder::draw_preview` from the actual content
+    /// length and pane height. Without this immediate clamp, scrolling past
+    /// an edge would let the offset keep accumulating unboundedly, so it'd
+    /// then take just as many opposite-direction presses to visibly move
+    /// again — see `StableScroll::scroll_clamped`.
+    pub fn scroll_preview(&mut self, delta: i32, min: i32, max: i32) {
+        self.preview_scroll.scroll_clamped(delta, min, max);
     }
 
     pub fn toggle_mark(&mut self) {
@@ -102,6 +156,10 @@ impl FuzzyFinderState {
         }
     }
 
+    /// Moving the selection doesn't need to touch `preview_scroll` directly
+    /// — every caller follows this with `request_finder_preview`, which
+    /// declares the new subject and lets `StableScroll` decide whether
+    /// anything actually changed.
     pub fn move_selection(&mut self, delta: i32) {
         if self.results.is_empty() {
             self.selected = 0;
@@ -143,6 +201,7 @@ impl FuzzyFinderState {
 /// ranking a list that's already in hand is a rendering concern, not I/O, so
 /// it stays here rather than behind the port.
 pub fn match_files(query: &str, candidates: &[PathBuf]) -> Vec<FinderMatch> {
+    use argus_domain::strip_diacritics;
     use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
     use nucleo_matcher::{Config, Matcher, Utf32Str};
 
@@ -155,15 +214,24 @@ pub fn match_files(query: &str, candidates: &[PathBuf]) -> Vec<FinderMatch> {
     }
 
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    // Diacritics are stripped from both the query and each candidate before
+    // matching (rather than relying on nucleo's own `Normalization::Smart`,
+    // which only folds accents when the *query* has none) so search is
+    // accent-insensitive in both directions — see docs/adr search notes.
+    // Stripping preserves char count/position 1:1, so indices computed here
+    // stay valid against the original (accented) display string used for
+    // rendering.
+    let normalized_query = strip_diacritics(query);
+    let pattern = Pattern::parse(&normalized_query, CaseMatching::Smart, Normalization::Never);
 
     let mut scored: Vec<(u32, PathBuf, Vec<usize>)> = Vec::new();
     let mut char_buf = Vec::new();
     let mut idx_buf = Vec::new();
     for path in candidates {
         let display = path.to_string_lossy();
+        let normalized_display = strip_diacritics(&display);
         char_buf.clear();
-        let haystack = Utf32Str::new(&display, &mut char_buf);
+        let haystack = Utf32Str::new(&normalized_display, &mut char_buf);
         idx_buf.clear();
         if let Some(score) = pattern.indices(haystack, &mut matcher, &mut idx_buf) {
             let indices = idx_buf.iter().map(|i| *i as usize).collect();
@@ -214,6 +282,15 @@ mod tests {
         let candidates = vec![PathBuf::from("src/app.rs"), PathBuf::from("src/other/appendix.rs")];
         let results = match_files("app", &candidates);
         assert_eq!(results[0].path, PathBuf::from("src/app.rs"));
+    }
+
+    #[test]
+    fn match_files_ignores_accents_in_both_directions() {
+        let candidates = vec![PathBuf::from("não.rs"), PathBuf::from("outro.rs")];
+        assert_eq!(match_files("nao", &candidates)[0].path, PathBuf::from("não.rs"));
+
+        let candidates = vec![PathBuf::from("nao.rs"), PathBuf::from("outro.rs")];
+        assert_eq!(match_files("não", &candidates)[0].path, PathBuf::from("nao.rs"));
     }
 
     #[test]

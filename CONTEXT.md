@@ -64,7 +64,7 @@ A single thing displayed inside a Region. Identified by a `PanelKind`.
 
 **PanelKind**:
 What a Panel displays. Deliberately an open-ended enum — v1 shipped only `Terminal(WorkspaceId)`;
-v2 adds `Editor(WorkspaceId)`, `FileExplorer(WorkspaceId)`, and `GitPanel(WorkspaceId)`; v3
+v2 adds `Editor(WorkspaceId)` and `FileExplorer(WorkspaceId)`; v3
 changes `Terminal` to carry a `SessionId` instead of a `WorkspaceId`, since the PTY it renders
 now belongs to a Session, not directly to a Workspace (see ADR-0010). This is the seam a future
 community widget system extends, not a fixed set.
@@ -87,10 +87,21 @@ no open file has no Split — the cell holds only the `Terminal` panel.
 
 **File Explorer**:
 The `FileExplorer` panel: a read/write tree view of a Workspace's directory, decorated with
-each file's `File Status` and CRUD actions (create, rename, delete, move). Ignored paths (per
+each file's `File Status`, with CRUD actions (create, rename, delete, move). Ignored paths (per
 `.gitignore`) still appear, dimmed. Scoped to one Workspace, like every sidebar panel.
-_Avoid_: File tree, Explorer (bare) — always qualify with "File" to not collide with the Git
-panel's own tree-like UI.
+_Avoid_: File tree, Explorer (bare) — always qualify with "File" to not collide with other
+panel kinds.
+
+**File Status**:
+A file's working-tree state relative to its git repository: modified, added, deleted, renamed,
+untracked, or conflicted. Drives the File Explorer's per-file badge — a single colored letter,
+mirroring VS Code — computed by shelling out to the user's own `git` (`GitStatusPort`, same
+git-CLI-vs-git2 tradeoff as ADR-0009, though that ADR's own `GitPanel`/`GitPort` were removed).
+A directory's badge is the combined status of every changed file at or beneath it, propagated
+recursively up to the Workspace root — so a single modified file deep in the tree marks every
+ancestor folder above it, not just its immediate parent.
+_Avoid_: Git status (bare) — always say "File Status" to keep this a File Explorer concept, not
+a claim that argus has a Git panel again.
 
 **Editor**:
 The `Editor` panel: a Monaco-backed code editor opened by clicking a file in the File Explorer.
@@ -104,20 +115,6 @@ something outside argus — almost always the `claude` process running in that W
 Terminal. Detected via file watcher. Never resolved silently: the user is always asked to keep
 the Editor's version or reload the on-disk version. A clean (non-dirty) open file reloads
 automatically instead, since there's nothing to lose.
-
-**Git Repository** (in the Git Panel sense):
-One independently-stageable/committable git repository as shown in the `GitPanel`. A Workspace
-whose directory is a git repo shows exactly one; each initialized git submodule beneath it adds
-another, since submodules commit independently of their parent repo. Not the same as
-`Workspace` — a Workspace with no `.git` shows zero Git Repositories and the GitPanel explains
-that instead of showing controls.
-_Avoid_: Repo, submodule (submodule is a *kind* of Git Repository once initialized, not a
-separate concept the UI treats differently).
-
-**File Status**:
-A file's working-tree state relative to its Git Repository: untracked, modified (unstaged),
-staged, or conflicted. Drives both the File Explorer's per-file decoration and the GitPanel's
-changed-files list. Computed by shelling out to the user's own `git` — see ADR-0009.
 
 **Path reference**:
 The text a file/folder drag from the File Explorer inserts into a Workspace's Terminal: the

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use argus_application::ports::{
-    ExitReason, FileSystemPort, FileWatcherPort, GitPort, PtyPort, WatchHandle,
+    ExitReason, FileSystemPort, FileWatcherPort, GitStatusPort, PtyPort, WatchHandle,
 };
 use argus_application::use_cases::{
     ConfirmCloseError, ConfirmCloseSessionError, ConfirmCloseSessionUseCase,
@@ -13,7 +13,7 @@ use argus_application::use_cases::{
 use argus_application::WorkspaceManager;
 use argus_domain::{SessionId, WorkspaceId};
 use argus_infrastructure::{
-    claude_sessions_dir, GitCliAdapter, HomeDirResolver, HookServer, NotifyWatcherAdapter,
+    claude_sessions_dir, GitStatusCliAdapter, HomeDirResolver, HookServer, NotifyWatcherAdapter,
     PlatformHomeDirResolver, PlatformPathResolver, PortablePtyAdapter, RipgrepSearchAdapter,
     StdFsAdapter,
 };
@@ -79,8 +79,8 @@ pub struct Runtime {
     pub manager: Arc<Mutex<WorkspaceManager>>,
     pub pty: Arc<PortablePtyAdapter>,
     pub fs: Arc<StdFsAdapter>,
+    pub git_status: Arc<GitStatusCliAdapter>,
     pub watcher: Arc<NotifyWatcherAdapter>,
-    pub git: Arc<GitCliAdapter>,
     #[allow(dead_code)]
     hook_server: Arc<HookServer>,
     create_workspace: Arc<TuiCreateWorkspaceUseCase>,
@@ -99,8 +99,8 @@ impl Runtime {
         let manager = Arc::new(Mutex::new(WorkspaceManager::new()));
         let pty = Arc::new(PortablePtyAdapter::new());
         let fs = Arc::new(StdFsAdapter::new());
+        let git_status = Arc::new(GitStatusCliAdapter::new());
         let watcher = Arc::new(NotifyWatcherAdapter::new());
-        let git = Arc::new(GitCliAdapter::new());
         let search_workspace = Arc::new(SearchWorkspaceUseCase::new(Arc::new(RipgrepSearchAdapter::new())));
         let path_resolver = Arc::new(PlatformPathResolver);
         let session_process_exit =
@@ -144,8 +144,8 @@ impl Runtime {
             manager,
             pty,
             fs,
+            git_status,
             watcher,
-            git,
             hook_server,
             create_workspace,
             create_session,
@@ -300,6 +300,31 @@ impl Runtime {
         });
     }
 
+    /// Runs `git status` over the whole workspace so the File Explorer can
+    /// decorate every row, not just currently-expanded directories — a
+    /// directory's badge is an aggregate over every changed file beneath it
+    /// (see `WorkspaceEntry::git_status_for`), regardless of whether that
+    /// file's own directory has been expanded yet.
+    pub fn spawn_git_status(&self, workspace_id: WorkspaceId, root: PathBuf) {
+        let git_status = Arc::clone(&self.git_status);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = git_status.status(root).await;
+            let _ = tx.send(AppEvent::GitStatusLoaded(workspace_id, result));
+        });
+    }
+
+    /// Fetches the current branch name for the topbar's " <workspace> @
+    /// <branch> " tab label — see `AppEvent::GitBranchLoaded`.
+    pub fn spawn_git_branch(&self, workspace_id: WorkspaceId, root: PathBuf) {
+        let git_status = Arc::clone(&self.git_status);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = git_status.branch(root).await;
+            let _ = tx.send(AppEvent::GitBranchLoaded(workspace_id, result));
+        });
+    }
+
     pub fn spawn_create_file(&self, workspace_id: WorkspaceId, path: PathBuf, parent: PathBuf) {
         let fs = Arc::clone(&self.fs);
         let tx = self.tx.clone();
@@ -342,134 +367,8 @@ impl Runtime {
         });
     }
 
-    pub fn spawn_git_available(&self) {
-        let git = Arc::clone(&self.git);
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let available = git.is_git_available().await;
-            let _ = tx.send(AppEvent::GitAvailable(available));
-        });
-    }
-
-    pub fn spawn_git_list_repositories(&self, workspace_id: WorkspaceId, root: PathBuf) {
-        let git = Arc::clone(&self.git);
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let repos = git.list_repositories(root).await;
-            let _ = tx.send(AppEvent::GitReposLoaded(workspace_id, repos));
-        });
-    }
-
-    pub fn spawn_git_refresh(&self, workspace_id: WorkspaceId, repo: PathBuf) {
-        let git = Arc::clone(&self.git);
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            // Four independent `git` subprocess calls — each pays its own
-            // process-spawn cost, so running them concurrently rather than
-            // one after another cuts the wall-clock latency of a refresh
-            // roughly 4x instead of paying that cost four times over.
-            let (status, branch, branches, sync) = tokio::join!(
-                git.status(repo.clone()),
-                git.current_branch(repo.clone()),
-                git.list_branches(repo.clone()),
-                git.sync_status(repo.clone()),
-            );
-            let _ = tx.send(AppEvent::GitRefreshed {
-                workspace_id,
-                repo,
-                status,
-                branch,
-                branches,
-                sync,
-            });
-        });
-    }
-
-    pub fn spawn_git_log(&self, workspace_id: WorkspaceId, repo: PathBuf, skip: u32, limit: u32) {
-        let git = Arc::clone(&self.git);
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let entries = git.log(repo.clone(), skip, limit).await;
-            let _ = tx.send(AppEvent::GitLogLoaded {
-                workspace_id,
-                repo,
-                skip,
-                entries,
-            });
-        });
-    }
-
-    pub fn spawn_git_stage(&self, workspace_id: WorkspaceId, repo: PathBuf, files: Vec<String>) {
-        let git = Arc::clone(&self.git);
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let result = git.stage(repo.clone(), files).await;
-            let _ = tx.send(AppEvent::GitActionDone {
-                workspace_id,
-                repo,
-                action: "stage",
-                result,
-            });
-        });
-    }
-
-    pub fn spawn_git_unstage(&self, workspace_id: WorkspaceId, repo: PathBuf, files: Vec<String>) {
-        let git = Arc::clone(&self.git);
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let result = git.unstage(repo.clone(), files).await;
-            let _ = tx.send(AppEvent::GitActionDone {
-                workspace_id,
-                repo,
-                action: "unstage",
-                result,
-            });
-        });
-    }
-
-    pub fn spawn_git_commit(&self, workspace_id: WorkspaceId, repo: PathBuf, message: String) {
-        let git = Arc::clone(&self.git);
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let result = git.commit(repo.clone(), message).await;
-            let _ = tx.send(AppEvent::GitActionDone {
-                workspace_id,
-                repo,
-                action: "commit",
-                result,
-            });
-        });
-    }
-
-    pub fn spawn_git_switch_branch(&self, workspace_id: WorkspaceId, repo: PathBuf, name: String) {
-        let git = Arc::clone(&self.git);
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let result = git.switch_branch(repo.clone(), name).await;
-            let _ = tx.send(AppEvent::GitActionDone {
-                workspace_id,
-                repo,
-                action: "switch_branch",
-                result,
-            });
-        });
-    }
-
-    pub fn spawn_git_push(&self, workspace_id: WorkspaceId, repo: PathBuf) {
-        self.spawn_git_remote_action(workspace_id, repo, "push");
-    }
-
-    pub fn spawn_git_pull(&self, workspace_id: WorkspaceId, repo: PathBuf) {
-        self.spawn_git_remote_action(workspace_id, repo, "pull");
-    }
-
-    pub fn spawn_git_fetch(&self, workspace_id: WorkspaceId, repo: PathBuf) {
-        self.spawn_git_remote_action(workspace_id, repo, "fetch");
-    }
-
     /// Walks the workspace's file tree for the fuzzy finder's Files-mode
-    /// index, via `SearchWorkspaceUseCase` — see `FileSearchPort` (ADR-0013
-    /// for why this doesn't go through `GitPort` instead).
+    /// index, via `SearchWorkspaceUseCase` — see `FileSearchPort` (ADR-0013).
     pub fn spawn_index_files(&self, workspace_id: WorkspaceId, root: PathBuf, include_ignored: bool) {
         let search_workspace = Arc::clone(&self.search_workspace);
         let tx = self.tx.clone();
@@ -531,29 +430,6 @@ impl Runtime {
                 Err(e) => Err(e),
             };
             let _ = tx.send(AppEvent::FinderPreviewLoaded { generation, path, result });
-        });
-    }
-
-    fn spawn_git_remote_action(
-        &self,
-        workspace_id: WorkspaceId,
-        repo: PathBuf,
-        action: &'static str,
-    ) {
-        let git = Arc::clone(&self.git);
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let result = match action {
-                "push" => git.push(repo.clone()).await,
-                "pull" => git.pull(repo.clone()).await,
-                _ => git.fetch(repo.clone()).await,
-            };
-            let _ = tx.send(AppEvent::GitActionDone {
-                workspace_id,
-                repo,
-                action,
-                result,
-            });
         });
     }
 }

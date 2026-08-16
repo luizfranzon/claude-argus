@@ -1,15 +1,15 @@
 pub mod agents;
 pub mod explorer;
-pub mod git;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{AppState, Focus, SidebarTab};
 use crate::i18n::t;
+use crate::ui::border::Border;
 use crate::ui::hitmap::HitMap;
 use crate::ui::layout::equal_columns;
 
@@ -24,27 +24,27 @@ pub fn draw(f: &mut Frame, area: Rect, app: &AppState, hitmap: &mut HitMap) {
     let Some(entry) = app.active_entry() else {
         let placeholder = Paragraph::new(t("sidebar.placeholder.no_workspace", &[]))
             .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL));
+            .block(Border::solid(Color::DarkGray).into_block());
         f.render_widget(placeholder, chunks[1]);
         return;
     };
 
-    let border_color = if app.resizing_sidebar {
-        Color::Yellow
+    // Same focus convention as the terminal pane: the flowing blue gradient
+    // marks whichever side currently has input focus, resizing gets its own
+    // solid color since it's a distinct (temporary) state, and everything
+    // else falls back to a flat gray.
+    let inner = if app.resizing_sidebar {
+        Border::solid(Color::Yellow).render(f, chunks[1])
     } else if app.focus == Focus::Sidebar {
-        Color::Cyan
+        Border::blue().animated(true).render(f, chunks[1])
     } else {
-        Color::DarkGray
+        Border::solid(Color::DarkGray).render(f, chunks[1])
     };
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(border_color));
-    let inner = block.inner(chunks[1]);
-    f.render_widget(block, chunks[1]);
     hitmap.sidebar_content_area = inner;
 
     match entry.sidebar_tab {
         SidebarTab::Agents => agents::draw(f, inner, app, entry, hitmap),
         SidebarTab::Explorer => explorer::draw(f, inner, app, entry, hitmap),
-        SidebarTab::Git => git::draw(f, inner, entry, hitmap),
     }
 }
 
@@ -53,7 +53,6 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &AppState, hitmap: &mut HitMap) {
     let labels = [
         (t("sidebar.tabs.agents", &[]), SidebarTab::Agents),
         (t("sidebar.tabs.explorer", &[]), SidebarTab::Explorer),
-        (t("sidebar.tabs.git", &[]), SidebarTab::Git),
     ];
     let columns = equal_columns(area, labels.len());
 

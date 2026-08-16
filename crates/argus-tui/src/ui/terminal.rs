@@ -1,11 +1,12 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::style::Color;
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use tui_term::widget::PseudoTerminal;
 
 use crate::app::{AppState, Focus};
 use crate::i18n::t;
+use crate::ui::border::Border;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &AppState) {
     let Some(session_id) = app.focused_session_id() else {
@@ -13,15 +14,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &AppState) {
         // closed) gets the animated mascot; no active workspace at all keeps
         // the plain placeholder below.
         if app.active_entry().is_some_and(|entry| entry.sessions.is_empty()) {
-            let block = Block::default().borders(Borders::ALL);
-            let inner = block.inner(area);
-            f.render_widget(block, area);
+            let inner = Border::solid(Color::DarkGray).render(f, area);
             crate::ui::mascot::draw(f, inner);
             return;
         }
         let placeholder = Paragraph::new(t("terminal.placeholder.no_focused_session", &[]))
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL));
+            .style(ratatui::style::Style::default().fg(Color::DarkGray))
+            .block(Border::solid(Color::DarkGray).into_block());
         f.render_widget(placeholder, area);
         return;
     };
@@ -35,13 +34,15 @@ pub fn draw(f: &mut Frame, area: Rect, app: &AppState) {
     // `ui::draw_statusbar`).
     if !app.focus_mode {
         let status = crate::ui::session_status_text(entry.status);
-        let border_color = if app.focus == Focus::Terminal { Color::Cyan } else { Color::DarkGray };
         let title = format!(" {}{} ", entry.session.name, status);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color))
-            .title(title);
-        pseudo_term = pseudo_term.block(block);
+        if app.focus == Focus::Terminal {
+            // The focused pane gets the flowing blue gradient to stand out
+            // from the rest of the (flat-colored) chrome.
+            let inner = Border::blue().animated(true).title(title).render(f, area);
+            f.render_widget(pseudo_term, inner);
+            return;
+        }
+        pseudo_term = pseudo_term.block(Border::solid(Color::DarkGray).title(title).into_block());
     }
 
     f.render_widget(pseudo_term, area);

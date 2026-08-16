@@ -25,19 +25,6 @@
   "statusbar.explorer.close_workspace": "close workspace",
   "statusbar.explorer.quit": "quit",
 
-  "statusbar.git.repo": "repo",
-  "statusbar.git.file": "file",
-  "statusbar.git.stage_toggle": "stage/unstage",
-  "statusbar.git.commit": "commit",
-  "statusbar.git.branch": "branch",
-  "statusbar.git.tab": "tab",
-  "statusbar.git.fetch": "fetch",
-  "statusbar.git.pull_push": "pull/push",
-  "statusbar.git.log": "log",
-  "statusbar.git.new_workspace": "new workspace",
-  "statusbar.git.close_workspace": "close workspace",
-  "statusbar.git.quit": "quit",
-
   "statusbar.focus_mode.label": "FOCUS MODE",
   "statusbar.focus_mode.exit": "exit",
   "statusbar.mouse_capture.on": "Mouse capture on — TUI clicks enabled",
@@ -61,8 +48,6 @@
   "modal.new_dir.body": "Name in {dir}:\n{input}_",
   "modal.rename_path.title": "Rename",
   "modal.rename_path.body": "New name for {from}:\n{input}_",
-  "modal.commit_message.title": "Commit",
-  "modal.commit_message.body": "Message:\n{input}_",
   "modal.confirm_close_session.title": "Close session",
   "modal.confirm_close_session.body": "Are you sure you want to close this session?",
   "modal.confirm_close_workspace.title": "Close workspace",
@@ -74,11 +59,6 @@
   "explorer.list.error_title": "Failed to list directory",
   "explorer.op.error_status": "file error: {error}",
   "explorer.op.error_title": "File error",
-
-  "git.log.error_status": "log error: {error}",
-  "git.action.error_status": "git {action} failed: {error}",
-  "git.action.error_title": "git {action} failed",
-  "git.commit.success_title": "Commit created",
 
   "finder.preview.error": "(could not read the file: {error})",
 
@@ -96,6 +76,7 @@
   "finder.results.placeholder_type_to_search": "type to search…",
   "finder.results.placeholder_no_results": "no results",
   "finder.footer.confirm": "confirm",
+  "finder.footer.focus": "focus preview",
   "finder.footer.mode": "mode",
   "finder.footer.mark": "mark",
   "finder.footer.ignored": "ignored",
@@ -105,13 +86,7 @@
   "sidebar.placeholder.no_workspace": "No active workspace — w to open a directory",
   "sidebar.tabs.agents": "1 Agents",
   "sidebar.tabs.explorer": "2 Explorer",
-  "sidebar.tabs.git": "3 Git",
   "sidebar.explorer.loading": "loading…",
-  "sidebar.git.message_label": "message: ",
-  "sidebar.git.not_installed": "git is not installed",
-  "sidebar.git.not_a_repo": "not a git repository",
-  "sidebar.git.no_changes": "no changes",
-  "sidebar.git.loading_log": "loading history…",
   "sidebar.agents.empty": "No session found.",
 
   "terminal.placeholder.no_focused_session": "No focused session — create one from the Agents tab (a)"

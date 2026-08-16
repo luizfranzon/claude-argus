@@ -4,11 +4,25 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem};
 use ratatui::Frame;
 
+use argus_application::ports::FileStatus;
+
 use crate::app::{AppState, WorkspaceEntry};
 use crate::i18n::t;
 use crate::icons;
 use crate::ui::hitmap::HitMap;
 use crate::ui::scroll;
+
+/// Color for a File Explorer row's status badge, matching VS Code's own
+/// File Explorer decoration palette.
+fn status_color(status: FileStatus) -> Color {
+    match status {
+        FileStatus::Modified => Color::Rgb(224, 175, 104),
+        FileStatus::Added | FileStatus::Untracked => Color::Rgb(115, 201, 145),
+        FileStatus::Deleted => Color::Rgb(224, 108, 117),
+        FileStatus::Renamed => Color::Rgb(115, 201, 145),
+        FileStatus::Conflicted => Color::Rgb(224, 108, 117),
+    }
+}
 
 pub fn draw(f: &mut Frame, area: Rect, _app: &AppState, entry: &WorkspaceEntry, hitmap: &mut HitMap) {
     let root = entry.workspace.directory.clone();
@@ -38,20 +52,41 @@ pub fn draw(f: &mut Frame, area: Rect, _app: &AppState, entry: &WorkspaceEntry, 
                 Style::default()
             };
 
-            let mut spans = vec![
-                Span::raw(if selected { "> " } else { "  " }),
-                Span::raw(indent),
-            ];
+            let prefix = format!("{}{indent}", if selected { "> " } else { "  " });
+            let mut width = prefix.chars().count();
+            let mut spans = vec![Span::raw(prefix)];
             if *is_dir {
                 let (icon, color) = icons::folder(expanded);
-                spans.push(Span::styled(format!("{} ", icons::arrow(expanded)), Style::default().fg(Color::DarkGray)));
-                spans.push(Span::styled(format!("{icon} "), Style::default().fg(color)));
+                let arrow = format!("{} ", icons::arrow(expanded));
+                let folder_icon = format!("{icon} ");
+                width += arrow.chars().count() + folder_icon.chars().count();
+                spans.push(Span::styled(arrow, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(folder_icon, Style::default().fg(color)));
             } else {
                 let (icon, color) = icons::for_file(&name);
+                let file_icon = format!("{icon} ");
+                width += 2 + file_icon.chars().count();
                 spans.push(Span::raw("  "));
-                spans.push(Span::styled(format!("{icon} "), Style::default().fg(color)));
+                spans.push(Span::styled(file_icon, Style::default().fg(color)));
             }
+            let status = entry.git_status_for(path, *is_dir);
+            let name_style = match status {
+                Some(status) if !selected => name_style.fg(status_color(status)),
+                _ => name_style,
+            };
+            width += name.chars().count();
             spans.push(Span::styled(name, name_style));
+            if let Some(status) = status {
+                // Right-align the badge, leaving at least one column of
+                // breathing room from the sidebar's edge (and from the name
+                // if the row's too narrow to fit both).
+                let pad = (area.width as usize).saturating_sub(width + 2).max(1);
+                spans.push(Span::raw(" ".repeat(pad)));
+                spans.push(Span::styled(
+                    status.letter().to_string(),
+                    Style::default().fg(status_color(status)).add_modifier(Modifier::BOLD),
+                ));
+            }
 
             ListItem::new(Line::from(spans))
         })

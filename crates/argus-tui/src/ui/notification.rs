@@ -1,10 +1,11 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::notification::Notification;
+use crate::ui::border::Border;
 
 use super::HitMap;
 
@@ -80,12 +81,7 @@ fn draw_card(f: &mut Frame, area: Rect, notification: &Notification, hovered: bo
     let close_fg = faded(if hovered { CLOSE_HOVER_RGB } else { CLOSE_RGB }, alpha);
 
     f.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border))
-        .style(Style::default().bg(BG));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = Border::solid(border).bg(BG).render(f, area);
 
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
     let title_row = Layout::horizontal([Constraint::Min(0), Constraint::Length(1)]).split(rows[0]);

@@ -23,7 +23,20 @@ impl AppState {
     /// `claude`'s stdin behind a pile of redraws and delaying real keystrokes
     /// typed right after.
     pub fn on_scroll_burst(&mut self, hitmap: &HitMap, mouse: MouseEvent, ticks: i32) {
-        if self.modal.is_some() || self.fuzzy_finder.is_some() || ticks == 0 {
+        if ticks == 0 {
+            return;
+        }
+        // The fuzzy finder's preview scrolls by hover alone, independent of
+        // which pane (results/preview) currently has Tab-focus — see
+        // `FuzzyFinderState::scroll_preview`. Everything else about the
+        // finder (and any other modal) ignores the wheel, same as before.
+        if let Some(finder) = self.fuzzy_finder.as_mut() {
+            if hitmap::hit(hitmap.finder_preview_area, mouse.column, mouse.row) {
+                finder.scroll_preview(-ticks, hitmap.finder_preview_offset_min, hitmap.finder_preview_offset_max);
+            }
+            return;
+        }
+        if self.modal.is_some() {
             return;
         }
         if hitmap::hit(hitmap.sidebar_content_area, mouse.column, mouse.row) {
@@ -255,32 +268,13 @@ impl AppState {
             return;
         }
 
-        if let Some((_, index, path, staged)) =
-            hitmap.git_rows.iter().find(|(r, ..)| hitmap::hit(*r, x, y)).cloned()
-        {
+        if hitmap::hit(hitmap.sidebar_content_area, x, y) {
             self.focus = super::Focus::Sidebar;
-            if let Some(workspace_id) = self.active_workspace {
-                if let Some(entry) = self.workspace_entries.get_mut(&workspace_id) {
-                    entry.git.selected_file = index;
-                }
-                let repo_path = self
-                    .workspace_entries
-                    .get(&workspace_id)
-                    .and_then(|w| w.git.active_repo())
-                    .map(|r| r.repo.path.clone());
-                if let Some(repo_path) = repo_path {
-                    if staged {
-                        self.runtime.spawn_git_unstage(workspace_id, repo_path, vec![path]);
-                    } else {
-                        self.runtime.spawn_git_stage(workspace_id, repo_path, vec![path]);
-                    }
-                }
-            }
             return;
         }
 
-        if hitmap::hit(hitmap.terminal_area, x, y) && self.focused_session_id().is_some() {
-            self.focus = super::Focus::Terminal;
+        if hitmap::hit(hitmap.terminal_area, x, y) {
+            self.focus_terminal();
         }
     }
 }

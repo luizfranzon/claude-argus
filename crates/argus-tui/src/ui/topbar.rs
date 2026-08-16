@@ -54,7 +54,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &AppState, hitmap: &mut HitMap) {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| entry.workspace.directory.display().to_string());
-        let title = match entry.git.active_repo().and_then(|repo| repo.branch.as_deref()) {
+        let title = match &entry.branch {
             Some(branch) => format!("{name} @ {branch}"),
             None => name,
         };

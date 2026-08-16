@@ -1,9 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use argus_application::ports::{
-    BranchInfo, CommitEntry, ExitReason, FileEntry, FileStatusEntry, FsError, GitError,
-    GitRepository, HighlightedLines, SyncStatus,
-};
+use argus_application::ports::{ExitReason, FileEntry, FileStatus, FsError, HighlightedLines};
 use argus_application::use_cases::{CreateSessionError, CreateWorkspaceError, CreatedWorkspace};
 use argus_domain::{Session, SessionId, WorkspaceId};
 use argus_infrastructure::HookEventKind;
@@ -41,28 +39,14 @@ pub enum AppEvent {
     ClaudeSessionRenamed(SessionId, String),
     DirLoaded(WorkspaceId, PathBuf, Result<Vec<FileEntry>, FsError>),
     FsOpDone(WorkspaceId, PathBuf, Result<(), FsError>),
-    GitAvailable(bool),
-    GitReposLoaded(WorkspaceId, Vec<GitRepository>),
-    GitRefreshed {
-        workspace_id: WorkspaceId,
-        repo: PathBuf,
-        status: Result<Vec<FileStatusEntry>, GitError>,
-        branch: Result<Option<String>, GitError>,
-        branches: Result<Vec<BranchInfo>, GitError>,
-        sync: Result<SyncStatus, GitError>,
-    },
-    GitLogLoaded {
-        workspace_id: WorkspaceId,
-        repo: PathBuf,
-        skip: u32,
-        entries: Result<Vec<CommitEntry>, GitError>,
-    },
-    GitActionDone {
-        workspace_id: WorkspaceId,
-        repo: PathBuf,
-        action: &'static str,
-        result: Result<(), GitError>,
-    },
+    /// `git status` finished for a Workspace's root — see
+    /// `Runtime::spawn_git_status`. Keyed by absolute path, empty when the
+    /// root isn't a git working tree (not an error).
+    GitStatusLoaded(WorkspaceId, HashMap<PathBuf, FileStatus>),
+    /// `git branch --show-current` finished for a Workspace's root — see
+    /// `Runtime::spawn_git_branch`. `None` when the root isn't a git working
+    /// tree, HEAD is detached, or the `git` binary isn't installed.
+    GitBranchLoaded(WorkspaceId, Option<String>),
     /// The fuzzy finder's file index (Files mode) finished walking. `all`
     /// distinguishes the gitignore-respecting index from the "show
     /// everything" one built lazily on the first Ctrl+G toggle.

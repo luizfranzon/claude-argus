@@ -52,17 +52,47 @@ fn walk_files_blocking(root: &Path, include_ignored: bool) -> Vec<PathBuf> {
     out
 }
 
-/// Escapes regex metacharacters so a user's typed query is always matched
-/// literally — content search is a "search for this text", not a regex
-/// prompt, and a stray `(`/`.`/`*` mid-typing shouldn't turn into an error
-/// or a surprising match.
-fn regex_escape(query: &str) -> String {
-    let mut out = String::with_capacity(query.len());
-    for c in query.chars() {
-        if "\\.+*?()|[]{}^$".contains(c) {
-            out.push('\\');
+/// Regex character class (no brackets) covering every case/diacritic variant
+/// of `base` for the Latin vowels plus `c`/`n`/`y` — the letters that
+/// commonly carry a diacritic in Portuguese and other Latin European
+/// languages. Kept in sync with `argus_domain::text::strip_diacritics`,
+/// which reduces any of these variants back down to `base`.
+fn accent_class(base: char) -> Option<&'static str> {
+    match base {
+        'a' | 'A' => Some("aàáâãäåāăąAÀÁÂÃÄÅĀĂĄ"),
+        'e' | 'E' => Some("eèéêëēĕėęěEÈÉÊËĒĔĖĘĚ"),
+        'i' | 'I' => Some("iìíîïĩīĭįıIÌÍÎÏĨĪĬĮİ"),
+        'o' | 'O' => Some("oòóôõöøōŏőOÒÓÔÕÖØŌŎŐ"),
+        'u' | 'U' => Some("uùúûüũūŭůűųUÙÚÛÜŨŪŬŮŰŲ"),
+        'c' | 'C' => Some("cçćĉċčCÇĆĈĊČ"),
+        'n' | 'N' => Some("nñńņňŉNÑŃŅŇ"),
+        'y' | 'Y' => Some("yýÿŷYÝŸŶ"),
+        _ => None,
+    }
+}
+
+/// Builds a regex pattern that matches `query` literally but accent-
+/// insensitively in both directions ("nao" finds "não" and vice versa):
+/// every character is first reduced to its plain-ASCII base via
+/// `strip_diacritics`, then either expanded into a bracket class of all its
+/// case/diacritic variants (for the letters `accent_class` covers) or
+/// escaped and matched as-is. Content search is "search for this text", not
+/// a regex prompt, so a stray `(`/`.`/`*` mid-typing must still match
+/// literally rather than turn into an error or a surprising match.
+fn accent_insensitive_pattern(query: &str) -> String {
+    let normalized = argus_domain::strip_diacritics(query);
+    let mut out = String::with_capacity(query.len() * 2);
+    for c in normalized.chars() {
+        if let Some(variants) = accent_class(c) {
+            out.push('[');
+            out.push_str(variants);
+            out.push(']');
+        } else {
+            if "\\.+*?()|[]{}^$".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
         }
-        out.push(c);
     }
     out
 }
@@ -76,7 +106,7 @@ fn grep_content_blocking(root: &Path, query: &str, include_ignored: bool) -> Vec
     if query.trim().is_empty() {
         return results;
     }
-    let Ok(matcher) = RegexMatcherBuilder::new().case_insensitive(true).build(&regex_escape(query)) else {
+    let Ok(matcher) = RegexMatcherBuilder::new().case_insensitive(true).build(&accent_insensitive_pattern(query)) else {
         return results;
     };
 
@@ -242,8 +272,25 @@ mod tests {
     }
 
     #[test]
-    fn regex_escape_neutralizes_metacharacters() {
-        assert_eq!(regex_escape("a.b*c"), r"a\.b\*c");
-        assert_eq!(regex_escape("plain text"), "plain text");
+    fn accent_insensitive_pattern_neutralizes_metacharacters() {
+        assert_eq!(accent_insensitive_pattern("a.b*c"), "[aàáâãäåāăąAÀÁÂÃÄÅĀĂĄ]\\.b\\*[cçćĉċčCÇĆĈĊČ]");
+        assert_eq!(accent_insensitive_pattern("xyz"), "x[yýÿŷYÝŸŶ]z");
+    }
+
+    #[tokio::test]
+    async fn grep_content_ignores_accents_in_both_directions() {
+        let dir = std::env::temp_dir().join(format!("argus-search-adapter-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "isso não funciona\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "isso nao devia falhar\n").unwrap();
+
+        let adapter = RipgrepSearchAdapter::new();
+        let unaccented_query = adapter.grep_content(dir.clone(), "nao".to_string(), false).await;
+        let accented_query = adapter.grep_content(dir.clone(), "não".to_string(), false).await;
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(unaccented_query.len(), 2, "query without accent should match both files");
+        assert_eq!(accented_query.len(), 2, "query with accent should match both files");
     }
 }

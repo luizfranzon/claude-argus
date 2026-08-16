@@ -13,8 +13,7 @@ impl Modal {
             | Modal::RenameSession { input, .. }
             | Modal::NewFile { input, .. }
             | Modal::NewDir { input, .. }
-            | Modal::RenamePath { input, .. }
-            | Modal::CommitMessage { input, .. } => input,
+            | Modal::RenamePath { input, .. } => input,
             Modal::ConfirmCloseSession { .. }
             | Modal::ConfirmCloseWorkspace { .. }
             | Modal::ConfirmDeletePath { .. } => return,
@@ -87,17 +86,6 @@ impl AppState {
                 TextInputAction::Cancel => {}
                 TextInputAction::Continue => {
                     self.modal = Some(Modal::RenamePath { workspace_id, from, input });
-                }
-            },
-            Modal::CommitMessage { workspace_id, repo, mut input } => match apply_text_input(&mut input, key) {
-                TextInputAction::Submit => {
-                    if !input.trim().is_empty() {
-                        self.runtime.spawn_git_commit(workspace_id, repo, input.trim().to_string());
-                    }
-                }
-                TextInputAction::Cancel => {}
-                TextInputAction::Continue => {
-                    self.modal = Some(Modal::CommitMessage { workspace_id, repo, input });
                 }
             },
             Modal::ConfirmCloseSession { session_id } => match key.code {

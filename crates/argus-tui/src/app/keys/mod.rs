@@ -7,7 +7,6 @@
 mod agents;
 mod explorer;
 mod finder;
-mod git;
 mod modal;
 mod sidebar;
 mod terminal;

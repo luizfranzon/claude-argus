@@ -17,8 +17,6 @@ pub struct HitMap {
     pub agents_rows: Vec<(Rect, usize, SessionId)>,
     /// `(row, absolute index into the flattened tree, path, is_dir)`.
     pub explorer_rows: Vec<(Rect, usize, PathBuf, bool)>,
-    /// `(row, absolute index into GitRepoState::status, file path, staged)`.
-    pub git_rows: Vec<(Rect, usize, String, bool)>,
     pub terminal_area: Rect,
     /// The active sidebar tab's content rect (inside its border) — used to
     /// route mouse-wheel scroll to the sidebar (e.g. moving the Explorer
@@ -27,6 +25,19 @@ pub struct HitMap {
     /// `(close-button cell, notification id)` — one per visible toast, filled
     /// while drawing the notification stack.
     pub notification_close: Vec<(Rect, u64)>,
+    /// The fuzzy finder's preview pane content rect (inside its border) —
+    /// used to route mouse-wheel scroll to the preview whenever the cursor
+    /// is over it, independent of which pane currently has keyboard focus.
+    /// Left at its `Rect::default()` (zero-sized, matches nothing) when the
+    /// finder isn't open.
+    pub finder_preview_area: Rect,
+    /// Bounds for `FuzzyFinderState::scroll_preview`'s manual offset,
+    /// computed by the last `draw_preview` from the actual content length
+    /// and pane height — the range that keeps the auto-centered position
+    /// plus the offset within `[0, max_scroll]`. Both stay `0` (a no-op
+    /// clamp) when the finder isn't open.
+    pub finder_preview_offset_min: i32,
+    pub finder_preview_offset_max: i32,
     /// The whole frame — kept so a sidebar-resize drag can re-run
     /// `ui::layout::compute` against it without the caller needing to track
     /// its own copy of the current terminal size.

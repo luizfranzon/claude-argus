@@ -1,6 +1,10 @@
 ---
-status: accepted
+status: superseded
 ---
+
+> Superseded: the Git sidebar tab (`GitPanel`) was removed as out of scope for argus. This ADR
+> is kept for historical context on the git-CLI-vs-git2 tradeoff, which may resurface if a
+> similar feature is proposed again.
 
 # GitPanel shells out to the system `git` CLI, not git2-rs
 

@@ -5,7 +5,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use argus_domain::WorkspaceId;
 
 use crate::app::{AppState, Focus};
-use crate::fuzzy_finder::{self, FinderMode, FuzzyFinderState};
+use crate::fuzzy_finder::{self, FinderFocus, FinderMode, FuzzyFinderState, PREVIEW_PAGE_SIZE};
+use crate::ui::hitmap::HitMap;
 
 impl AppState {
     pub(crate) fn open_fuzzy_finder(&mut self) {
@@ -78,8 +79,16 @@ impl AppState {
         let Some(path) = finder.selected_abs_path() else {
             finder.preview = None;
             finder.preview_path = None;
+            finder.preview_scroll.reset();
             return;
         };
+        // Declares what the preview should now be showing; `StableScroll`
+        // itself decides whether that's actually a change (real navigation)
+        // or a no-op re-request (e.g. a filesystem-watcher reindex arriving
+        // while Files mode is open, which keeps the current selection but
+        // still calls this) — see `FuzzyFinderState::preview_scroll`.
+        let line = finder.results.get(finder.selected).and_then(|m| m.line);
+        finder.preview_scroll.set_subject((path.clone(), line));
         self.runtime.spawn_finder_preview(path, finder.preview_gen);
     }
 
@@ -88,7 +97,8 @@ impl AppState {
     /// submit/cancel text field — it deliberately does not route through
     /// `text_input::apply`, which only covers the six `Modal` variants that
     /// carry a free-text `input` (see `text_input.rs`'s module doc comment).
-    pub(crate) fn handle_finder_key(&mut self, key: KeyEvent) {
+    pub(crate) fn handle_finder_key(&mut self, key: KeyEvent, hitmap: &HitMap) {
+        let (min, max) = (hitmap.finder_preview_offset_min, hitmap.finder_preview_offset_max);
         let Some(finder) = self.fuzzy_finder.as_mut() else { return };
         match key.code {
             KeyCode::Esc => {
@@ -100,7 +110,14 @@ impl AppState {
                 self.close_fuzzy_finder();
                 self.insert_finder_targets(workspace_id, targets);
             }
+            // Tab switches which pane arrow keys/PageUp/PageDown drive —
+            // the results list or the preview (for scrolling it). Mode
+            // (Files/Content) moved to Ctrl+Space so Tab could take this
+            // over; see the Ctrl+Space arm below.
             KeyCode::Tab => {
+                finder.toggle_focus();
+            }
+            KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 finder.toggle_mode();
                 self.refresh_finder_results();
             }
@@ -121,6 +138,18 @@ impl AppState {
                     self.runtime.spawn_index_files(workspace_id, root, true);
                 }
                 self.refresh_finder_results();
+            }
+            KeyCode::Up if finder.focus == FinderFocus::Preview => {
+                finder.scroll_preview(-1, min, max);
+            }
+            KeyCode::Down if finder.focus == FinderFocus::Preview => {
+                finder.scroll_preview(1, min, max);
+            }
+            KeyCode::PageUp if finder.focus == FinderFocus::Preview => {
+                finder.scroll_preview(-PREVIEW_PAGE_SIZE, min, max);
+            }
+            KeyCode::PageDown if finder.focus == FinderFocus::Preview => {
+                finder.scroll_preview(PREVIEW_PAGE_SIZE, min, max);
             }
             KeyCode::Up => {
                 finder.move_selection(-1);

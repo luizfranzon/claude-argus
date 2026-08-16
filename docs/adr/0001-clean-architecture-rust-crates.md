@@ -8,7 +8,7 @@ argus needs Rust to own all business logic (Workspace lifecycle, PTY session man
 close-confirmation rules), per an explicit user requirement for Clean Architecture. We split
 Rust into three crates — `argus-domain` (pure entities and rules, no I/O or async runtime),
 `argus-application` (use cases and ports as traits), `argus-infrastructure` (real adapters:
-`portable-pty`, PATH resolution, git CLI, filesystem) — with `argus-tui` as a thin composition
+`portable-pty`, PATH resolution, filesystem) — with `argus-tui` as a thin composition
 root that wires adapters to use cases and renders the terminal UI.
 
 The dependency direction is enforced by the Cargo dependency graph itself: `argus-domain`

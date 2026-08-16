@@ -8,6 +8,7 @@ mod notification;
 mod paste_coalesce;
 mod runtime;
 mod scroll_coalesce;
+mod stable_scroll;
 mod terminal_protocol;
 mod text_input;
 mod ui;

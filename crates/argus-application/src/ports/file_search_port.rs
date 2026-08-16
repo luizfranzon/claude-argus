@@ -21,8 +21,7 @@ pub struct SearchMatch {
 /// grepping file contents, and syntax-highlighting a preview. Deliberately
 /// separate from `FileSystemPort` — that port is CRUD over one path at a
 /// time; this one is read-only, tree-wide, and backed by a fast gitignore-
-/// aware walker rather than `git` itself (see ADR-0013 for why file search
-/// doesn't route through `GitPort`).
+/// aware walker rather than shelling out to `git` itself (see ADR-0013).
 #[async_trait]
 pub trait FileSearchPort: Send + Sync {
     /// Lists every file (not directory) under `root`, as paths relative to

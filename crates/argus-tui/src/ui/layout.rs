@@ -77,7 +77,7 @@ pub fn pty_content_size(terminal_area: Rect, bordered: bool) -> (u16, u16) {
 }
 
 /// Splits `area` into `n` equal-width horizontal columns — shared by every
-/// tab bar (topbar workspaces, sidebar Agents/Explorer/Git) so the Rects used
+/// tab bar (topbar workspaces, sidebar Agents/Explorer) so the Rects used
 /// to render each tab are the exact same ones used to hit-test clicks on it.
 pub fn equal_columns(area: Rect, n: usize) -> Vec<Rect> {
     if n == 0 {

@@ -12,7 +12,6 @@ impl AppState {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('1') => self.set_sidebar_tab(SidebarTab::Agents),
             KeyCode::Char('2') => self.set_sidebar_tab(SidebarTab::Explorer),
-            KeyCode::Char('3') => self.set_sidebar_tab(SidebarTab::Git),
             KeyCode::Tab => self.cycle_sidebar_tab(),
             KeyCode::Char('[') => self.cycle_workspace(-1),
             KeyCode::Char(']') => self.cycle_workspace(1),
@@ -35,7 +34,6 @@ impl AppState {
                 match tab {
                     Some(SidebarTab::Agents) => self.handle_agents_key(key),
                     Some(SidebarTab::Explorer) => self.handle_explorer_key(key),
-                    Some(SidebarTab::Git) => self.handle_git_key(key),
                     None => {}
                 }
             }
@@ -52,8 +50,7 @@ impl AppState {
         if let Some(w) = self.active_entry_mut() {
             w.sidebar_tab = match w.sidebar_tab {
                 SidebarTab::Agents => SidebarTab::Explorer,
-                SidebarTab::Explorer => SidebarTab::Git,
-                SidebarTab::Git => SidebarTab::Agents,
+                SidebarTab::Explorer => SidebarTab::Agents,
             };
         }
     }

@@ -6,9 +6,7 @@ mod pty_output;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use argus_application::ports::{
-    BranchInfo, CommitEntry, FileEntry, FileStatusEntry, GitRepository, SyncStatus,
-};
+use argus_application::ports::{FileEntry, FileStatus};
 use argus_domain::{Session, SessionId, Workspace, WorkspaceId};
 use argus_infrastructure::HookEventKind;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -30,7 +28,6 @@ const SCROLLBACK: usize = 5000;
 pub enum SidebarTab {
     Agents,
     Explorer,
-    Git,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,58 +123,6 @@ impl ExplorerState {
     }
 }
 
-pub struct GitRepoState {
-    pub repo: GitRepository,
-    pub status: Vec<FileStatusEntry>,
-    pub branch: Option<String>,
-    pub branches: Vec<BranchInfo>,
-    pub sync: Option<SyncStatus>,
-    pub log: Vec<CommitEntry>,
-    pub log_loading: bool,
-    pub log_complete: bool,
-}
-
-impl GitRepoState {
-    fn new(repo: GitRepository) -> Self {
-        Self {
-            repo,
-            status: Vec::new(),
-            branch: None,
-            branches: Vec::new(),
-            sync: None,
-            log: Vec::new(),
-            log_loading: false,
-            log_complete: false,
-        }
-    }
-}
-
-pub struct GitState {
-    pub available: Option<bool>,
-    pub repos: Vec<GitRepoState>,
-    pub selected_repo: usize,
-    pub selected_file: usize,
-    pub commit_message: String,
-    pub show_log: bool,
-}
-
-impl GitState {
-    fn new() -> Self {
-        Self {
-            available: None,
-            repos: Vec::new(),
-            selected_repo: 0,
-            selected_file: 0,
-            commit_message: String::new(),
-            show_log: false,
-        }
-    }
-
-    pub fn active_repo(&self) -> Option<&GitRepoState> {
-        self.repos.get(self.selected_repo)
-    }
-}
-
 pub struct WorkspaceEntry {
     pub workspace: Workspace,
     pub sessions: Vec<SessionId>,
@@ -185,7 +130,6 @@ pub struct WorkspaceEntry {
     pub sidebar_tab: SidebarTab,
     pub agents_selected: usize,
     pub explorer: ExplorerState,
-    pub git: GitState,
     /// Fuzzy finder's Files-mode index, workspace-relative paths,
     /// respecting `.gitignore` — `None` until the first walk completes.
     /// Kept fresh by re-walking on every `AppEvent::FsChanged`.
@@ -194,6 +138,14 @@ pub struct WorkspaceEntry {
     /// first time Ctrl+G is pressed inside the finder and refreshed
     /// alongside it from then on.
     pub file_index_all: Option<Vec<PathBuf>>,
+    /// Every changed file under this Workspace's root, absolute-path keyed —
+    /// see `Runtime::spawn_git_status`. Empty until the first result arrives,
+    /// or forever if the root isn't a git working tree.
+    pub git_status: HashMap<PathBuf, FileStatus>,
+    /// Current branch name for the topbar's " <workspace> @ <branch> " tab
+    /// label — see `Runtime::spawn_git_branch`. `None` until the first
+    /// result arrives, or forever if the root isn't a git working tree.
+    pub branch: Option<String>,
 }
 
 impl WorkspaceEntry {
@@ -205,10 +157,29 @@ impl WorkspaceEntry {
             sidebar_tab: SidebarTab::Agents,
             agents_selected: 0,
             explorer: ExplorerState::new(),
-            git: GitState::new(),
             file_index: None,
             file_index_all: None,
+            git_status: HashMap::new(),
+            branch: None,
         }
+    }
+
+    /// The File Explorer row badge for `path`. A file's status is a direct
+    /// lookup; a directory's is the combined (most-alarming-wins, see
+    /// `FileStatus::combine`) status of every changed file at or beneath it —
+    /// computed from the flat `git_status` map so it's correct even for
+    /// directories the Explorer hasn't expanded (and so never listed into
+    /// `explorer.dirs`) yet. This is how the badge propagates recursively up
+    /// to the Workspace root, matching VS Code's File Explorer.
+    pub fn git_status_for(&self, path: &std::path::Path, is_dir: bool) -> Option<FileStatus> {
+        if !is_dir {
+            return self.git_status.get(path).copied();
+        }
+        self.git_status
+            .iter()
+            .filter(|(p, _)| p.starts_with(path))
+            .map(|(_, status)| *status)
+            .reduce(FileStatus::combine)
     }
 }
 
@@ -218,7 +189,6 @@ pub enum Modal {
     NewFile { workspace_id: WorkspaceId, dir: PathBuf, input: String },
     NewDir { workspace_id: WorkspaceId, dir: PathBuf, input: String },
     RenamePath { workspace_id: WorkspaceId, from: PathBuf, input: String },
-    CommitMessage { workspace_id: WorkspaceId, repo: PathBuf, input: String },
     ConfirmCloseSession { session_id: SessionId },
     ConfirmCloseWorkspace { workspace_id: WorkspaceId },
     ConfirmDeletePath { workspace_id: WorkspaceId, path: PathBuf, parent: PathBuf },
@@ -311,7 +281,12 @@ impl AppState {
             workspace_entries: HashMap::new(),
             sessions: HashMap::new(),
             active_workspace: None,
-            focus: Focus::Terminal,
+            // No session exists yet at construction time (the initial
+            // workspace is still spawning), so `Focus::Terminal` here would
+            // hit the same empty-terminal-focus bug `can_focus_terminal`
+            // guards against elsewhere. `on_workspace_created` moves focus
+            // to the terminal itself once a session actually exists.
+            focus: Focus::Sidebar,
             focus_mode: false,
             modal: None,
             fuzzy_finder: None,
@@ -342,10 +317,16 @@ impl AppState {
     /// Whether something is animating purely on wall-clock time (no
     /// discrete event to hang a `mark_dirty` off of) and therefore still
     /// needs periodic redraws even while otherwise idle: a "thinking"
-    /// spinner, an unread blink dot, a fading toast, or a status-line
-    /// message counting down to its own clearing.
+    /// spinner, an unread blink dot, a fading toast, a status-line message
+    /// counting down to its own clearing, or the focused pane's rotating
+    /// gradient border. Outside Focus Mode, `focus` always points at either
+    /// the terminal or the sidebar (see `Focus`), and whichever one it is
+    /// draws its border with `Border::blue().animated(true)` — so `!self.
+    /// focus_mode` alone is enough to know one of them needs the tick;
+    /// Focus Mode strips the terminal's border entirely, so it drops out.
     pub fn is_animating(&self) -> bool {
-        self.status_line_at.is_some()
+        !self.focus_mode
+            || self.status_line_at.is_some()
             || self.notifications.visible().next().is_some()
             || self
                 .sessions
@@ -354,12 +335,6 @@ impl AppState {
     }
 
     // ---- notifications --------------------------------------------------
-
-    /// Raises an info toast (blue border) — the default kind for routine,
-    /// non-actionable feedback.
-    pub fn notify_info(&mut self, title: impl Into<String>, message: impl Into<String>) {
-        self.notifications.info(title, message);
-    }
 
     /// Raises a warning toast (orange border) — something worth the user's
     /// attention but not a failure.
@@ -423,6 +398,24 @@ impl AppState {
         self.active_entry().and_then(|w| w.focused_session)
     }
 
+    /// Whether focus can move to `Focus::Terminal` right now — only true
+    /// when the active workspace actually has a session to show there.
+    /// `ui::terminal::draw` renders no border (and no focus indication at
+    /// all) for the empty-workspace placeholder/mascot states, so sending
+    /// focus there anyway leaves the user with no visual cue of where focus
+    /// went.
+    pub fn can_focus_terminal(&self) -> bool {
+        self.focused_session_id().is_some()
+    }
+
+    /// Moves focus to the terminal pane, but only if `can_focus_terminal`
+    /// allows it — otherwise a no-op, leaving focus wherever it already was.
+    pub fn focus_terminal(&mut self) {
+        if self.can_focus_terminal() {
+            self.focus = Focus::Terminal;
+        }
+    }
+
     /// Marks the currently displayed session as read. Called once per event
     /// loop iteration (see `main.rs`) so any path that changes which session
     /// is focused — direct selection, auto-focus on close, switching back to
@@ -481,82 +474,22 @@ impl AppState {
                     self.notify_warn(t("explorer.list.error_title", &[]), e.to_string());
                 }
             },
+            AppEvent::GitStatusLoaded(workspace_id, status) => {
+                if let Some(entry) = self.workspace_entries.get_mut(&workspace_id) {
+                    entry.git_status = status;
+                }
+            }
+            AppEvent::GitBranchLoaded(workspace_id, branch) => {
+                if let Some(entry) = self.workspace_entries.get_mut(&workspace_id) {
+                    entry.branch = branch;
+                }
+            }
             AppEvent::FsOpDone(workspace_id, parent, result) => {
                 if let Err(e) = result {
                     self.set_status(t("explorer.op.error_status", &[("error", &e.to_string())]));
                     self.notify_warn(t("explorer.op.error_title", &[]), e.to_string());
                 }
                 self.runtime.spawn_list_dir(workspace_id, parent);
-            }
-            AppEvent::GitAvailable(available) => {
-                if let Some(id) = self.active_workspace {
-                    if let Some(w) = self.workspace_entries.get_mut(&id) {
-                        w.git.available = Some(available);
-                    }
-                }
-            }
-            AppEvent::GitReposLoaded(workspace_id, repos) => {
-                if let Some(w) = self.workspace_entries.get_mut(&workspace_id) {
-                    for repo in repos {
-                        if !w.git.repos.iter().any(|r| r.repo.path == repo.path) {
-                            w.git.repos.push(GitRepoState::new(repo));
-                        }
-                    }
-                }
-                let paths: Vec<PathBuf> = self
-                    .workspace_entries
-                    .get(&workspace_id)
-                    .map(|w| w.git.repos.iter().map(|r| r.repo.path.clone()).collect())
-                    .unwrap_or_default();
-                for repo in paths {
-                    self.runtime.spawn_git_refresh(workspace_id, repo);
-                }
-            }
-            AppEvent::GitRefreshed { workspace_id, repo, status, branch, branches, sync } => {
-                if let Some(repo_state) = self.repo_state_mut(workspace_id, &repo) {
-                    if let Ok(status) = status {
-                        repo_state.status = status;
-                    }
-                    if let Ok(branch) = branch {
-                        repo_state.branch = branch;
-                    }
-                    if let Ok(branches) = branches {
-                        repo_state.branches = branches;
-                    }
-                    if let Ok(sync) = sync {
-                        repo_state.sync = Some(sync);
-                    }
-                }
-            }
-            AppEvent::GitLogLoaded { workspace_id, repo, skip, entries } => {
-                if let Some(repo_state) = self.repo_state_mut(workspace_id, &repo) {
-                    repo_state.log_loading = false;
-                    match entries {
-                        Ok(entries) => {
-                            if entries.len() < 30 {
-                                repo_state.log_complete = true;
-                            }
-                            if skip == 0 {
-                                repo_state.log = entries;
-                            } else {
-                                repo_state.log.extend(entries);
-                            }
-                        }
-                        Err(e) => self.set_status(t("git.log.error_status", &[("error", &e.to_string())])),
-                    }
-                }
-            }
-            AppEvent::GitActionDone { workspace_id, repo, action, result } => {
-                if let Err(e) = result {
-                    self.set_status(t("git.action.error_status", &[("action", action), ("error", &e.to_string())]));
-                    self.notify_error(t("git.action.error_title", &[("action", action)]), e.to_string());
-                } else if action == "commit" {
-                    if let Some(w) = self.workspace_entries.get_mut(&workspace_id) {
-                        w.git.commit_message.clear();
-                    }
-                    self.notify_info(t("git.commit.success_title", &[]), format!("{}", repo.display()));
-                }
-                self.runtime.spawn_git_refresh(workspace_id, repo);
             }
             AppEvent::FinderIndexed { workspace_id, all, files } => {
                 if let Some(w) = self.workspace_entries.get_mut(&workspace_id) {
@@ -607,15 +540,6 @@ impl AppState {
                 }
             }
         }
-    }
-
-    fn repo_state_mut(&mut self, workspace_id: WorkspaceId, repo: &PathBuf) -> Option<&mut GitRepoState> {
-        self.workspace_entries
-            .get_mut(&workspace_id)?
-            .git
-            .repos
-            .iter_mut()
-            .find(|r| &r.repo.path == repo)
     }
 
     fn on_session_spawned(
@@ -677,9 +601,9 @@ impl AppState {
 
                 self.runtime.watch_workspace(workspace_id, workspace.directory.clone());
                 self.runtime.spawn_list_dir(workspace_id, workspace.directory.clone());
-                self.runtime.spawn_git_available();
-                self.runtime.spawn_git_list_repositories(workspace_id, workspace.directory.clone());
                 self.runtime.spawn_index_files(workspace_id, workspace.directory.clone(), false);
+                self.runtime.spawn_git_status(workspace_id, workspace.directory.clone());
+                self.runtime.spawn_git_branch(workspace_id, workspace.directory.clone());
                 self.resize_focused_session();
             }
             Err(e) => {
@@ -709,15 +633,13 @@ impl AppState {
         for dir in loaded_dirs {
             self.runtime.spawn_list_dir(workspace_id, dir);
         }
-        let repo_paths: Vec<PathBuf> = entry.git.repos.iter().map(|r| r.repo.path.clone()).collect();
-        for repo in repo_paths {
-            self.runtime.spawn_git_refresh(workspace_id, repo);
-        }
         let root = entry.workspace.directory.clone();
         self.runtime.spawn_index_files(workspace_id, root.clone(), false);
         if entry.file_index_all.is_some() {
-            self.runtime.spawn_index_files(workspace_id, root, true);
+            self.runtime.spawn_index_files(workspace_id, root.clone(), true);
         }
+        self.runtime.spawn_git_status(workspace_id, root.clone());
+        self.runtime.spawn_git_branch(workspace_id, root);
     }
 
     // ---- terminal sizing --------------------------------------------------
@@ -766,7 +688,7 @@ impl AppState {
         }
 
         if self.fuzzy_finder.is_some() {
-            self.handle_finder_key(key);
+            self.handle_finder_key(key, hitmap);
             return;
         }
 
@@ -776,7 +698,7 @@ impl AppState {
         if key.code == KeyCode::F(8) {
             self.focus_mode = !self.focus_mode;
             if self.focus_mode {
-                self.focus = Focus::Terminal;
+                self.focus_terminal();
             }
             self.resize_for_current_layout(hitmap.full);
             return;

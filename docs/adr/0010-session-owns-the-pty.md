@@ -20,7 +20,7 @@ Workspace today.
 
 The alternative considered was keeping one PTY per Workspace and letting a user open multiple
 Workspaces on the same directory to get parallel agents. Rejected because Workspace already
-means "one directory tab" throughout the UI (File Explorer, Git Panel, Editor are all
+means "one directory tab" throughout the UI (File Explorer, Editor are all
 Workspace-scoped by directory) — duplicating tabs per directory would have duplicated those
 panels too, for no benefit, instead of just adding a second dimension (Session) under the
 existing Workspace.

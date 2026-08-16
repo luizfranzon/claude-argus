@@ -19,7 +19,6 @@ const MAX_VISIBLE: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationKind {
-    Info,
     Warn,
     Error,
 }
@@ -27,7 +26,6 @@ pub enum NotificationKind {
 impl NotificationKind {
     pub fn rgb(self) -> (u8, u8, u8) {
         match self {
-            NotificationKind::Info => (59, 130, 246),
             NotificationKind::Warn => (245, 158, 11),
             NotificationKind::Error => (239, 68, 68),
         }
@@ -65,10 +63,10 @@ impl Notification {
     }
 }
 
-/// Toast notification engine: any part of the app pushes a card via `info`
-/// / `warn` / `error`, `tick` (called from the main loop's existing 250ms
-/// redraw tick, same as `AppState::tick`) expires whatever has been visible
-/// for `LIFETIME`, and `ui::notification::draw` renders whatever remains.
+/// Toast notification engine: any part of the app pushes a card via `warn`
+/// / `error`, `tick` (called from the main loop's existing 250ms redraw
+/// tick, same as `AppState::tick`) expires whatever has been visible for
+/// `LIFETIME`, and `ui::notification::draw` renders whatever remains.
 #[derive(Default)]
 pub struct NotificationCenter {
     queue: VecDeque<Notification>,
@@ -78,10 +76,6 @@ pub struct NotificationCenter {
 impl NotificationCenter {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn info(&mut self, title: impl Into<String>, message: impl Into<String>) {
-        self.push(NotificationKind::Info, title, message);
     }
 
     pub fn warn(&mut self, title: impl Into<String>, message: impl Into<String>) {
