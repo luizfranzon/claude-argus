@@ -48,7 +48,7 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
             let mut buf = [0u8; 4];
             Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
         }
-        KeyCode::Enter => Some(vec![b'\r']),
+        KeyCode::Enter => Some(modified_enter_bytes(key.modifiers)),
         KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Tab => Some(vec![b'\t']),
         KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
@@ -66,6 +66,23 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::F(n) => function_key_bytes(n),
         _ => None,
     }
+}
+
+/// Plain Enter is `\r`, but Shift/Alt/Shift+Alt+Enter need to reach the child
+/// PTY as a *distinct* sequence — apps like Claude Code use that to insert a
+/// newline instead of submitting. We encode them as CSI-u (`\x1b[13;N u`),
+/// the modifier convention xterm's `modifyOtherKeys`/the Kitty keyboard
+/// protocol use for the Enter key (code 13), so terminal-aware children can
+/// tell modified Enter apart from a plain one.
+fn modified_enter_bytes(modifiers: KeyModifiers) -> Vec<u8> {
+    let shift = modifiers.contains(KeyModifiers::SHIFT);
+    let alt = modifiers.contains(KeyModifiers::ALT);
+    if !shift && !alt {
+        return vec![b'\r'];
+    }
+    // CSI-u modifier codes are 1 + bitmask(shift=1, alt=2, ctrl=4).
+    let modifier_code = 1 + (shift as u8) + (alt as u8) * 2;
+    format!("\x1b[13;{modifier_code}u").into_bytes()
 }
 
 fn function_key_bytes(n: u8) -> Option<Vec<u8>> {
@@ -112,6 +129,24 @@ mod tests {
     fn enter_encodes_as_carriage_return() {
         let bytes = key_to_bytes(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(bytes, Some(vec![b'\r']));
+    }
+
+    #[test]
+    fn shift_enter_encodes_as_csi_u_sequence() {
+        let bytes = key_to_bytes(&key(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(bytes, Some(b"\x1b[13;2u".to_vec()));
+    }
+
+    #[test]
+    fn alt_enter_encodes_as_csi_u_sequence() {
+        let bytes = key_to_bytes(&key(KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(bytes, Some(b"\x1b[13;3u".to_vec()));
+    }
+
+    #[test]
+    fn shift_alt_enter_encodes_as_csi_u_sequence() {
+        let bytes = key_to_bytes(&key(KeyCode::Enter, KeyModifiers::SHIFT | KeyModifiers::ALT));
+        assert_eq!(bytes, Some(b"\x1b[13;4u".to_vec()));
     }
 
     #[test]

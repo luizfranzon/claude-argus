@@ -93,6 +93,17 @@ cargo run -p argus-tui
 | `1` / `2` | Alternar entre Agents e Explorer       |
 | `q`       | Sair                                   |
 
+### Configuração
+
+| Variável de ambiente | Padrão | Efeito                                                                                                                                                                                                                              |
+| --------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ARGUS_FPS`           | `120`  | Taxa de redraw da UI, em quadros por segundo. Argus converte sozinho para o intervalo em milissegundos (`1000 / ARGUS_FPS`) — você só informa quantos FPS quer. Valores maiores reduzem a latência entre um evento (scroll, tecla, saída do `claude`) e ele aparecer na tela, ao custo de mais CPU; valores menores economizam CPU (útil em SSH/máquinas fracas). Aceita `1` a `1000`; valor ausente, inválido ou fora da faixa cai no padrão. |
+
+```sh
+ARGUS_FPS=240 argus   # mais responsivo, mais CPU
+ARGUS_FPS=30 argus    # mais leve, ideal para SSH/hardware fraco
+```
+
 ## Distribuição
 
 Para instalar o binário `argus` no `PATH` (`~/.cargo/bin`), igual ao `claude`:

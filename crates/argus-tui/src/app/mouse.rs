@@ -16,12 +16,16 @@ impl AppState {
     /// rendering the last frame. Ignored while a modal is open (the modal
     /// doesn't register any click targets of its own yet).
     /// Applies a coalesced mouse-wheel flick (see `scroll_coalesce`) as a
-    /// single write of `ticks.abs()` repeated SGR wheel reports — same
-    /// position/gating math as routing one `ScrollUp`/`ScrollDown` through
-    /// `on_mouse`, just batched into one syscall and one redraw instead of
-    /// one per notch, which is what keeps a fast flick from backing up
-    /// `claude`'s stdin behind a pile of redraws and delaying real keystrokes
-    /// typed right after.
+    /// single write of repeated SGR wheel reports — same position/gating math
+    /// as routing one `ScrollUp`/`ScrollDown` through `on_mouse`, just batched
+    /// into one syscall and one redraw instead of one per notch, which is
+    /// what keeps a fast flick from backing up `claude`'s stdin behind a pile
+    /// of redraws and delaying real keystrokes typed right after. When the
+    /// scroll lands on the terminal content itself (not the sidebar or the
+    /// finder preview, both index-based navigation rather than analog
+    /// scroll), the line count sent is `ticks` run through
+    /// `ScrollAccelerator` first, so an unbroken flick scrolls further the
+    /// faster it's performed instead of at `ticks`' flat rate.
     pub fn on_scroll_burst(&mut self, hitmap: &HitMap, mouse: MouseEvent, ticks: i32) {
         if ticks == 0 {
             return;
@@ -48,11 +52,15 @@ impl AppState {
             return;
         }
         let Some(session_id) = self.focused_session_id() else { return };
-        let button = if ticks > 0 { 64 } else { 65 };
+        let now = std::time::Instant::now();
+        let gap = self.last_terminal_scroll_at.map(|at| now.duration_since(at));
+        self.last_terminal_scroll_at = Some(now);
+        let lines = self.scroll_accel.accelerate(ticks, gap);
+        let button = if lines > 0 { 64 } else { 65 };
         let col = mouse.column.saturating_sub(content.x).saturating_add(1).max(1);
         let row = mouse.row.saturating_sub(content.y).saturating_add(1).max(1);
         let mut bytes = Vec::new();
-        for _ in 0..ticks.unsigned_abs() {
+        for _ in 0..lines.unsigned_abs() {
             bytes.extend_from_slice(format!("\x1b[<{button};{col};{row}M").as_bytes());
         }
         self.runtime.write_to_session(session_id, &bytes);

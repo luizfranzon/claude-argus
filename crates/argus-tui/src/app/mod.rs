@@ -244,6 +244,14 @@ pub struct AppState {
     /// report, even if the drag strays outside the terminal content rect, so
     /// the child never sees a press with no matching release.
     forwarding_mouse: bool,
+    /// Ramps up how many lines a wheel-scroll burst forwards to the focused
+    /// session the longer an unbroken flick over the terminal content runs —
+    /// see `scroll_coalesce::ScrollAccelerator`. `last_terminal_scroll_at`
+    /// is the wall-clock half of that: the gap since the previous burst is
+    /// what tells the accelerator whether this one continues the same flick
+    /// or starts a fresh, deliberate scroll.
+    scroll_accel: crate::scroll_coalesce::ScrollAccelerator,
+    last_terminal_scroll_at: Option<std::time::Instant>,
     /// Text waiting for the main loop to push to the system clipboard: a
     /// payload decoded out of a session's raw PTY byte stream when the child
     /// process (`claude`) emits its own OSC 52 "set clipboard" escape
@@ -301,6 +309,8 @@ impl AppState {
             resizing_sidebar: false,
             mouse_capture_enabled: true,
             forwarding_mouse: false,
+            scroll_accel: crate::scroll_coalesce::ScrollAccelerator::new(),
+            last_terminal_scroll_at: None,
             clipboard_copy_requested: None,
             notifications: NotificationCenter::new(),
             hovered_notification: None,

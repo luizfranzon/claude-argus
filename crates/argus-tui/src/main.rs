@@ -104,6 +104,60 @@ fn initial_directory() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// Default redraw rate (~120Hz) — see the comment above `redraw.tick()` in
+/// `run()` for why 120Hz over the previous fixed 60Hz.
+const DEFAULT_FPS: u64 = 120;
+
+/// Redraw rate, overridable via `ARGUS_FPS` for whoever wants to trade CPU
+/// for input-to-pixel latency (higher) or the reverse (lower) without
+/// recompiling — e.g. a low-power/remote SSH session that would rather
+/// redraw at 30fps than tick twice as often for no visible benefit over a
+/// laggy link. Takes frames-per-second rather than a millisecond interval
+/// directly since that's the number people actually think in; this is where
+/// the FPS-to-ms conversion happens so the rest of the app only deals in
+/// `Duration`. Clamped to `[1, 1000]` fps before the divide: 0 would make
+/// `tokio::time::interval` panic (division by zero → a zero `Duration`), and
+/// above 1000fps the resulting interval rounds to 0-1ms anyway, past the
+/// point a redraw rate means anything. An unset or unparseable value
+/// silently falls back to `DEFAULT_FPS` rather than failing to start over a
+/// typo.
+fn redraw_interval() -> Duration {
+    let fps = std::env::var("ARGUS_FPS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(DEFAULT_FPS);
+    fps_to_interval(fps)
+}
+
+/// The pure fps → `Duration` half of `redraw_interval`, pulled out so the
+/// clamping/rounding math is unit-testable without going through an
+/// environment variable.
+fn fps_to_interval(fps: u64) -> Duration {
+    Duration::from_millis(1000 / fps.clamp(1, 1000))
+}
+
+#[cfg(test)]
+mod redraw_rate_tests {
+    use super::*;
+
+    #[test]
+    fn sixty_fps_is_the_old_default_interval() {
+        assert_eq!(fps_to_interval(60), Duration::from_millis(16));
+    }
+
+    #[test]
+    fn hundred_twenty_fps_is_the_new_default_interval() {
+        assert_eq!(fps_to_interval(120), Duration::from_millis(8));
+    }
+
+    #[test]
+    fn zero_fps_clamps_up_instead_of_dividing_by_zero() {
+        assert_eq!(fps_to_interval(0), fps_to_interval(1));
+    }
+
+    #[test]
+    fn absurdly_high_fps_clamps_down_to_the_cap() {
+        assert_eq!(fps_to_interval(1_000_000), fps_to_interval(1000));
+    }
+}
+
 fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -249,12 +303,19 @@ async fn run(
     let mut hitmap = ui::HitMap::default();
     let mut mouse_capture_enabled = state.mouse_capture_enabled;
     // Redraws are decoupled from input: every event just updates `state`,
-    // and only this fixed 60Hz tick actually calls `terminal.draw()`. Caps
-    // redraw work at a steady rate instead of one full-frame redraw per
+    // and only this fixed tick actually calls `terminal.draw()`. Caps redraw
+    // work at a steady rate instead of one full-frame redraw per
     // keystroke/PTY chunk (the old behavior), and `Delay` (rather than the
     // default `Burst`) means a slow iteration pushes the next tick back
-    // instead of firing a catch-up burst of redraws.
-    let mut redraw = tokio::time::interval(Duration::from_millis(16));
+    // instead of firing a catch-up burst of redraws. Defaults to 120fps
+    // (`redraw_interval`, overridable via `ARGUS_FPS`) rather than the
+    // previous fixed 60Hz to halve worst-case input-to-pixel latency (a
+    // change landing right after a tick now waits at most ~8ms instead of
+    // ~16ms for the next one) — `terminal.draw()` only touches cells that
+    // actually changed (ratatui's own diffing), so the idle cost of ticking
+    // twice as often is small; see ADR-0014 for why this is a tick *and* a
+    // `dirty`/`is_animating()` gate, not tick rate alone.
+    let mut redraw = tokio::time::interval(redraw_interval());
     redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Populated only on Windows, by `paste_coalesce::drain_paste_burst`
     // when it drains one event too many while probing for a paste burst —
