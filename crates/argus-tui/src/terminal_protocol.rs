@@ -34,31 +34,29 @@ pub fn sgr_mouse_button(kind: MouseEventKind) -> Option<(u8, bool)> {
 /// the wire — there is no browser terminal emulator underneath a TUI to do
 /// this for us, so it's re-derived here.
 pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        if let KeyCode::Char(c) = key.code {
-            let c = c.to_ascii_lowercase();
-            if c.is_ascii_alphabetic() {
-                let byte = (c as u8) - b'a' + 1;
-                return Some(vec![byte]);
+    match key.code {
+        KeyCode::Char(c) => Some(char_key_bytes(c, key.modifiers)),
+        KeyCode::Enter => Some(modified_enter_bytes(key.modifiers)),
+        // Plain Backspace is DEL, but Alt+Backspace needs to reach the child
+        // as ESC-DEL — the convention readline (and Claude Code's own line
+        // editor) binds to backward-kill-word — otherwise it's
+        // indistinguishable from a plain single-char delete.
+        KeyCode::Backspace => {
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                Some(vec![0x1b, 0x7f])
+            } else {
+                Some(vec![0x7f])
             }
         }
-    }
-    match key.code {
-        KeyCode::Char(c) => {
-            let mut buf = [0u8; 4];
-            Some(c.encode_utf8(&mut buf).as_bytes().to_vec())
-        }
-        KeyCode::Enter => Some(modified_enter_bytes(key.modifiers)),
-        KeyCode::Backspace => Some(vec![0x7f]),
         KeyCode::Tab => Some(vec![b'\t']),
         KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
         KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Up => Some(b"\x1b[A".to_vec()),
-        KeyCode::Down => Some(b"\x1b[B".to_vec()),
-        KeyCode::Right => Some(b"\x1b[C".to_vec()),
-        KeyCode::Left => Some(b"\x1b[D".to_vec()),
-        KeyCode::Home => Some(b"\x1b[H".to_vec()),
-        KeyCode::End => Some(b"\x1b[F".to_vec()),
+        KeyCode::Up => Some(modified_csi_bytes('A', key.modifiers)),
+        KeyCode::Down => Some(modified_csi_bytes('B', key.modifiers)),
+        KeyCode::Right => Some(modified_csi_bytes('C', key.modifiers)),
+        KeyCode::Left => Some(modified_csi_bytes('D', key.modifiers)),
+        KeyCode::Home => Some(modified_csi_bytes('H', key.modifiers)),
+        KeyCode::End => Some(modified_csi_bytes('F', key.modifiers)),
         KeyCode::PageUp => Some(b"\x1b[5~".to_vec()),
         KeyCode::PageDown => Some(b"\x1b[6~".to_vec()),
         KeyCode::Delete => Some(b"\x1b[3~".to_vec()),
@@ -66,6 +64,33 @@ pub fn key_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::F(n) => function_key_bytes(n),
         _ => None,
     }
+}
+
+/// Encodes a character key with its modifiers. `Ctrl` collapses a letter to
+/// its control byte (`Ctrl+A` → `0x01`) or, for underscore, to `0x1f` (the
+/// `Ctrl+_`/`Ctrl+Shift+-` undo-last-edit binding — some terminals report the
+/// shifted `-` as `Char('_')` directly, others as `Char('-')` with `SHIFT`
+/// held, so both are recognized). `Alt` then prefixes the result with `ESC`
+/// — the standard "meta sends escape" convention — which is what lets
+/// Alt-word-navigation (`Alt+B`/`Alt+F`), `Alt+Y` (paste-history cycling),
+/// and the other documented `Alt+<letter>` shortcuts reach the child as
+/// something other than a bare keypress.
+fn char_key_bytes(c: char, modifiers: KeyModifiers) -> Vec<u8> {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    let shift = modifiers.contains(KeyModifiers::SHIFT);
+    let alt = modifiers.contains(KeyModifiers::ALT);
+    let mut bytes = if ctrl && c.to_ascii_lowercase().is_ascii_alphabetic() {
+        vec![(c.to_ascii_lowercase() as u8) - b'a' + 1]
+    } else if ctrl && (c == '_' || (c == '-' && shift)) {
+        vec![0x1f]
+    } else {
+        let mut buf = [0u8; 4];
+        c.encode_utf8(&mut buf).as_bytes().to_vec()
+    };
+    if alt {
+        bytes.insert(0, 0x1b);
+    }
+    bytes
 }
 
 /// Plain Enter is `\r`, but Shift/Alt/Shift+Alt+Enter need to reach the child
@@ -83,6 +108,23 @@ fn modified_enter_bytes(modifiers: KeyModifiers) -> Vec<u8> {
     // CSI-u modifier codes are 1 + bitmask(shift=1, alt=2, ctrl=4).
     let modifier_code = 1 + (shift as u8) + (alt as u8) * 2;
     format!("\x1b[13;{modifier_code}u").into_bytes()
+}
+
+/// Cursor-movement keys (arrows, Home/End) encode modifiers as
+/// `CSI 1;<code><final>` — the same `xterm`/Kitty modifier convention as
+/// `modified_enter_bytes`, but without CSI-u's leading keycode field, since
+/// these already have dedicated final bytes. Plain (unmodified) presses omit
+/// the `1;<code>` prefix entirely, matching what most terminals send and
+/// what child readline/editor implementations expect.
+fn modified_csi_bytes(final_byte: char, modifiers: KeyModifiers) -> Vec<u8> {
+    if modifiers.is_empty() {
+        return format!("\x1b[{final_byte}").into_bytes();
+    }
+    let shift = modifiers.contains(KeyModifiers::SHIFT);
+    let alt = modifiers.contains(KeyModifiers::ALT);
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    let modifier_code = 1 + (shift as u8) + (alt as u8) * 2 + (ctrl as u8) * 4;
+    format!("\x1b[1;{modifier_code}{final_byte}").into_bytes()
 }
 
 fn function_key_bytes(n: u8) -> Option<Vec<u8>> {
@@ -126,6 +168,34 @@ mod tests {
     }
 
     #[test]
+    fn alt_char_prefixes_esc_meta_escape() {
+        // Alt+B / Alt+F are Claude Code's word-navigation shortcuts.
+        assert_eq!(key_to_bytes(&key(KeyCode::Char('b'), KeyModifiers::ALT)), Some(vec![0x1b, b'b']));
+        assert_eq!(key_to_bytes(&key(KeyCode::Char('f'), KeyModifiers::ALT)), Some(vec![0x1b, b'f']));
+        // Alt+Y cycles paste history after Ctrl+Y.
+        assert_eq!(key_to_bytes(&key(KeyCode::Char('y'), KeyModifiers::ALT)), Some(vec![0x1b, b'y']));
+    }
+
+    #[test]
+    fn ctrl_alt_letter_combines_control_byte_with_meta_escape() {
+        let bytes = key_to_bytes(&key(KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::ALT));
+        assert_eq!(bytes, Some(vec![0x1b, 3]));
+    }
+
+    #[test]
+    fn ctrl_underscore_encodes_undo_byte() {
+        assert_eq!(key_to_bytes(&key(KeyCode::Char('_'), KeyModifiers::CONTROL)), Some(vec![0x1f]));
+    }
+
+    #[test]
+    fn ctrl_shift_dash_encodes_undo_byte() {
+        assert_eq!(
+            key_to_bytes(&key(KeyCode::Char('-'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+            Some(vec![0x1f])
+        );
+    }
+
+    #[test]
     fn enter_encodes_as_carriage_return() {
         let bytes = key_to_bytes(&key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(bytes, Some(vec![b'\r']));
@@ -153,6 +223,28 @@ mod tests {
     fn arrow_keys_encode_as_csi_sequences() {
         assert_eq!(key_to_bytes(&key(KeyCode::Up, KeyModifiers::NONE)), Some(b"\x1b[A".to_vec()));
         assert_eq!(key_to_bytes(&key(KeyCode::Down, KeyModifiers::NONE)), Some(b"\x1b[B".to_vec()));
+    }
+
+    #[test]
+    fn ctrl_arrow_encodes_modifier_in_csi_sequence() {
+        assert_eq!(
+            key_to_bytes(&key(KeyCode::Left, KeyModifiers::CONTROL)),
+            Some(b"\x1b[1;5D".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(&key(KeyCode::Right, KeyModifiers::CONTROL)),
+            Some(b"\x1b[1;5C".to_vec())
+        );
+    }
+
+    #[test]
+    fn alt_backspace_encodes_as_esc_del() {
+        assert_eq!(key_to_bytes(&key(KeyCode::Backspace, KeyModifiers::ALT)), Some(vec![0x1b, 0x7f]));
+    }
+
+    #[test]
+    fn plain_backspace_encodes_as_del() {
+        assert_eq!(key_to_bytes(&key(KeyCode::Backspace, KeyModifiers::NONE)), Some(vec![0x7f]));
     }
 
     #[test]
