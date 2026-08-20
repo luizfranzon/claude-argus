@@ -13,36 +13,6 @@
   <img src=".github/screenshot-argus-1.png" alt="Screenshot do argus mostrando o sidebar de Agents e um terminal do Claude Code rodando" width="900">
 </p>
 
-## O que é
-
-`argus` é uma TUI em Rust que gerencia processos `claude` como uma IDE gerenciaria abas: você
-abre um diretório como **Workspace** e roda quantas **Sessions** do Claude Code precisar dentro
-dele, cada uma em seu próprio PTY, lado a lado num grid redimensionável — sem precisar de várias
-janelas de terminal ou `tmux` manual.
-
-O modelo de domínio completo (Workspace, Session, Feature Group, Region, Panel, etc.) está
-documentado em [`CONTEXT.md`](CONTEXT.md); as decisões de arquitetura, uma por uma, em
-[`docs/adr/`](docs/adr).
-
-## Funcionalidades
-
-- **Múltiplas sessões por workspace** — cada Session roda seu próprio `claude` num PTY isolado;
-  feche uma sem afetar as outras.
-- **Grid estilo tmux** — as Sessions ativas se organizam num split livremente redimensionável,
-  e você pode arrastar uma célula sobre outra para trocar posições.
-- **Status em tempo real** — cada Session mostra se está `Thinking`, `Idle` ou `Waiting` (bloqueada
-  numa decisão), lido diretamente dos hooks do Claude Code, não por parsing de PTY.
-- **Feature Groups** — organize as Sessions de um workspace em grupos coloridos definidos por
-  você; filtre o grid por grupo sem fechar nada.
-- **File Explorer integrado** — árvore de arquivos com badge de `git status` por arquivo
-  (e propagado para as pastas ancestrais), com criar/renomear/mover/excluir.
-- **Editor embutido** — abra um arquivo do File Explorer num editor Monaco em split ao lado do
-  terminal, com abas para múltiplos arquivos e detecção de conflito de edição externa.
-- **Path reference por drag-and-drop** — arraste um arquivo do File Explorer para dentro do
-  terminal e ele insere o caminho relativo, pronto para você completar o comando.
-- **i18n de verdade** — toda a UI (não a saída do Claude) é traduzível; nenhum texto fica
-  parcialmente traduzido em nenhum idioma que o argus suporte.
-
 ## Instalação
 
 ### 1. Instalar o Rust (inclui `cargo`)
